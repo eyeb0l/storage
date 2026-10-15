@@ -1,0 +1,882 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Storage</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #F4F4F2;
+  --card: #FFFFFF;
+  --ink: #18181A;
+  --ink-2: #3D3D42;
+  --muted: #7B7B82;
+  --line: #E6E6E3;
+  --line-2: #F0F0EE;
+  --hover: #F7F7F5;
+  --safe: #2F9E5E;
+  --review: #D9861A;
+  --c-code: #7666E8;
+  --c-ai: #DE4F86;
+  --c-sdk: #2C9FC0;
+  --c-cache: #4A78E6;
+  --c-media: #EC8433;
+  --c-other: #9C9CA3;
+  --fill-outer: 11%;
+  --fill-inner: 20%;
+  --stroke: 40%;
+  --hatch: 58%;
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111113;
+    --card: #1A1A1D;
+    --ink: #EDEDEF;
+    --ink-2: #CDCDD2;
+    --muted: #8E8E96;
+    --line: #2A2A2F;
+    --line-2: #222226;
+    --hover: #212125;
+    --safe: #45B874;
+    --review: #E59A35;
+    --fill-outer: 13%;
+    --fill-inner: 24%;
+    --stroke: 42%;
+    --hatch: 70%;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.4 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  padding: 20px clamp(16px, 2.4vw, 32px) 40px;
+}
+.num, code, pre { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+button { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+.masthead { display: flex; justify-content: space-between; align-items: baseline; gap: 8px 24px; flex-wrap: wrap; margin: 0 2px 14px; }
+.masthead h1 { font-size: 15px; font-weight: 600; margin: 0; display: inline; }
+.masthead .sub { color: var(--muted); margin-left: 10px; }
+.masthead .rescan { color: var(--muted); margin: 0; font-size: 13px; }
+.masthead code { color: var(--ink-2); background: var(--card); border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; font-size: 12px; }
+
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+
+/* Stats */
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); overflow: hidden; margin-bottom: 16px; }
+.stat { padding: 16px 20px 18px; border-left: 1px solid var(--line); min-width: 0; }
+.stat:first-child { border-left: 0; }
+.stat .label { color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 7px; }
+.stat .label i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.stat .value { margin-top: 6px; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.stat .value b { font: 600 26px/1.1 var(--mono); letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.stat .value span { color: var(--muted); font: 13px var(--mono); }
+.stat .value span.up { color: var(--safe); }
+.capacity { grid-column: 1 / -1; border-top: 1px solid var(--line); padding: 12px 20px 14px; display: grid; grid-template-columns: auto 1fr auto; gap: 14px; align-items: center; color: var(--muted); font-size: 12px; }
+.bar { height: 8px; border-radius: 4px; background: var(--line-2); display: flex; overflow: hidden; }
+.bar > * { height: 100%; transition: width .3s ease; }
+.bar .used { background: color-mix(in srgb, var(--ink) 55%, var(--card)); }
+.bar .freed { background: var(--safe) repeating-linear-gradient(135deg, rgb(255 255 255 / .35) 0 1.5px, transparent 1.5px 5px); }
+
+/* Layout */
+.main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(330px, 400px); gap: 16px; align-items: stretch; }
+.panel-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 16px 16px 0 18px; }
+.panel-head h2 { font-size: 16px; font-weight: 600; margin: 0; }
+.panel-head p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+
+/* Explorer */
+.explorer { display: flex; flex-direction: column; min-width: 0; }
+.seg { display: inline-flex; background: var(--line-2); border: 1px solid var(--line); border-radius: 9px; padding: 2px; flex: none; }
+.seg button { border: 0; background: none; padding: 5px 12px; border-radius: 7px; cursor: pointer; color: var(--muted); font-size: 13px; }
+.seg button[aria-pressed="true"] { background: var(--card); color: var(--ink); font-weight: 500; box-shadow: 0 0 0 1px var(--line); }
+.crumbs { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 14px 0 0; padding: 8px 18px; border-top: 1px solid var(--line-2); color: var(--muted); }
+.crumbs nav { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; min-width: 0; }
+.crumbs nav button { border: 0; background: none; padding: 2px 5px; border-radius: 5px; cursor: pointer; color: var(--muted); }
+.crumbs nav button:hover { background: var(--hover); color: var(--ink); }
+.crumbs nav button[aria-current] { color: var(--ink); cursor: default; background: none; }
+.crumbs nav .sep { color: var(--line); padding: 0 1px; }
+.crumbs .num { font-size: 13px; flex: none; }
+.tm-wrap { padding: 0 13px; }
+#tm { position: relative; height: clamp(420px, calc(100vh - 360px), 780px); }
+.tm-empty { position: absolute; inset: 3px; display: grid; place-items: center; color: var(--muted); border: 1px dashed var(--line); border-radius: 10px; }
+
+.tile {
+  --c: var(--c-other);
+  position: absolute; overflow: hidden;
+  border-radius: 9px;
+  background-color: color-mix(in srgb, var(--c) var(--fill-outer), var(--card));
+  border: 1px solid color-mix(in srgb, var(--c) var(--stroke), var(--card));
+  color: var(--ink-2);
+}
+.tile.in { border-radius: 6px; background-color: color-mix(in srgb, var(--c) var(--fill-inner), var(--card)); }
+.tile.leaf0 { background-color: color-mix(in srgb, var(--c) var(--fill-inner), var(--card)); }
+.tile.can-open { cursor: pointer; }
+.tile.can-open:hover { border-color: color-mix(in srgb, var(--c) 75%, var(--card)); }
+.tile.agg { --c: var(--c-other) !important; background-color: color-mix(in srgb, var(--c-other) 8%, var(--card)); }
+.cat-code { --c: var(--c-code); } .cat-ai { --c: var(--c-ai); } .cat-sdk { --c: var(--c-sdk); }
+.cat-cache { --c: var(--c-cache); } .cat-media { --c: var(--c-media); } .cat-other { --c: var(--c-other); }
+.mode-cleanup .tile { --c: var(--c-other); }
+.mode-cleanup .tile.tier-safe { --c: var(--safe); }
+.mode-cleanup .tile.tier-review { --c: var(--review); }
+.tile.sel {
+  --c: var(--safe) !important;
+  background-image: repeating-linear-gradient(135deg, color-mix(in srgb, var(--safe) var(--hatch), transparent) 0 1.3px, transparent 1.3px 7.5px);
+}
+.tile.hl { box-shadow: 0 0 0 2px var(--ink); z-index: 2; }
+.tile.hl-in { box-shadow: 0 0 0 1.5px var(--ink); }
+.th { display: flex; justify-content: space-between; gap: 8px; padding: 6px 9px 0 10px; height: 26px; align-items: baseline; }
+.tn { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.group > .th .tn { font-weight: 600; color: var(--ink); font-size: 13px; }
+.ts { font: 12px var(--mono); color: var(--muted); white-space: nowrap; }
+.leaf { position: absolute; inset: 0; padding: 7px 9px 7px 9px; display: flex; flex-direction: column; justify-content: space-between; }
+.leaf .tn { display: block; }
+.leaf .big { font-family: var(--mono); font-weight: 600; color: var(--ink); letter-spacing: -0.02em; white-space: nowrap; line-height: 1; }
+.agg .tn { color: var(--muted); }
+.tile .partial { position: absolute; left: 0; bottom: 0; height: 4px; background: var(--safe); border-radius: 0 2px 0 0; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; padding: 12px 18px 14px; color: var(--muted); font-size: 12.5px; }
+.legend span { display: inline-flex; align-items: center; gap: 7px; }
+.legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; background: var(--c); }
+.legend i.hatch { background: color-mix(in srgb, var(--safe) 18%, var(--card)) repeating-linear-gradient(135deg, var(--safe) 0 1px, transparent 1px 3.5px); outline: 1px solid color-mix(in srgb, var(--safe) 50%, transparent); }
+.note { margin: 0 18px 16px; color: var(--muted); font-size: 12.5px; }
+.note summary { cursor: pointer; }
+.note ul { margin: 6px 0 0; padding-left: 18px; font: 12px var(--mono); max-height: 140px; overflow: auto; }
+
+#tip { position: fixed; z-index: 50; pointer-events: none; background: var(--ink); color: var(--card); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; max-width: 360px; box-shadow: 0 6px 24px rgb(0 0 0 / .18); }
+#tip .p { font-family: var(--mono); font-size: 11.5px; opacity: .75; word-break: break-all; }
+#tip .r { margin-top: 4px; }
+
+/* Recommendations */
+.recs { position: relative; min-height: 560px; }
+.recs-inner { position: absolute; inset: 0; display: flex; flex-direction: column; }
+.recs .panel-head { padding-bottom: 12px; border-bottom: 1px solid var(--line-2); }
+#recList { flex: 1; overflow: auto; overscroll-behavior: contain; }
+.group-head { position: sticky; top: 0; z-index: 1; display: flex; justify-content: space-between; align-items: center; padding: 10px 16px 8px 18px; background: var(--card); border-bottom: 1px solid var(--line-2); }
+.group-head .num { color: var(--muted); font-size: 13px; }
+.pill { font-size: 12px; font-weight: 500; padding: 2px 8px; border-radius: 6px; }
+.pill.safe { color: var(--safe); background: color-mix(in srgb, var(--safe) 12%, var(--card)); }
+.pill.review { color: var(--review); background: color-mix(in srgb, var(--review) 13%, var(--card)); }
+.rec { border-bottom: 1px solid var(--line-2); }
+.rec-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto 20px; gap: 12px; align-items: center; padding: 11px 12px 11px 18px; cursor: pointer; }
+.rec-row:hover, .rec.hot .rec-row { background: var(--hover); }
+input[type=checkbox] {
+  appearance: none; -webkit-appearance: none; margin: 0; cursor: pointer;
+  width: 17px; height: 17px; border-radius: 4px; display: grid; place-items: center;
+  border: 1.5px solid color-mix(in srgb, var(--ink) 30%, var(--card)); background: var(--card);
+}
+input[type=checkbox]:hover { border-color: color-mix(in srgb, var(--ink) 60%, var(--card)); }
+input[type=checkbox]:checked, input[type=checkbox]:indeterminate { background: var(--ink); border-color: var(--ink); }
+input[type=checkbox]:checked::before { content: ""; width: 4px; height: 8px; margin-top: -2px; border: solid var(--card); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+input[type=checkbox]:indeterminate::before { content: ""; width: 8px; height: 2px; border-radius: 1px; background: var(--card); }
+.rec-title { font-size: 14px; font-weight: 500; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rec-hint { font: 12px var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+.rec-size { font: 500 14px var(--mono); color: var(--ink); white-space: nowrap; }
+.rec-size small { color: var(--muted); font-weight: 400; font-size: 12px; }
+.chev { border: 0; background: none; padding: 0; width: 20px; height: 20px; display: grid; place-items: center; color: var(--muted); cursor: pointer; border-radius: 5px; }
+.chev svg { transition: transform .18s ease; }
+.rec.open .chev svg { transform: rotate(90deg); }
+.manual-mark { width: 17px; height: 17px; border-radius: 4px; border: 1px dashed var(--muted); opacity: .6; }
+.rec-detail { padding: 0 16px 14px 52px; }
+.rec-detail p { margin: 0 0 10px; color: var(--ink-2); font-size: 13px; max-width: 62ch; }
+.rec-detail p.how { color: var(--muted); }
+.paths { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line-2); border-radius: 8px; max-height: 300px; overflow: auto; }
+.paths li + li { border-top: 1px solid var(--line-2); }
+.paths label { display: grid; grid-template-columns: 17px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 7px 10px; cursor: pointer; }
+.paths label:hover { background: var(--hover); }
+.paths input { width: 15px; height: 15px; }
+.paths .pl { min-width: 0; }
+.paths .pn { font-size: 12.5px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+.paths .pm { font: 11.5px var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+.paths .ps { font: 12.5px var(--mono); color: var(--ink-2); }
+.paths .more { padding: 7px 10px; color: var(--muted); font-size: 12.5px; }
+.recs-foot { border-top: 1px solid var(--line); padding: 12px 16px 14px 18px; }
+.recs-foot .line { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; color: var(--muted); font-size: 13px; }
+.recs-foot .line b { color: var(--ink); font: 600 14px var(--mono); }
+.linkbtn { border: 0; background: none; padding: 0; color: var(--muted); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; font-size: 13px; }
+.linkbtn:hover { color: var(--ink); }
+.actions { display: flex; gap: 8px; margin-top: 10px; }
+.btn { border: 1px solid var(--line); background: var(--card); border-radius: 8px; padding: 7px 13px; font-weight: 500; cursor: pointer; font-size: 13.5px; white-space: nowrap; }
+.btn:hover { background: var(--hover); }
+.btn.primary { background: var(--ink); color: var(--card); border-color: var(--ink); margin-left: auto; }
+.btn.primary:hover { background: color-mix(in srgb, var(--ink) 85%, var(--card)); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.status { margin: 9px 0 0; font-size: 12.5px; color: var(--muted); min-height: 1.4em; }
+.status code { color: var(--ink); }
+
+dialog { border: 1px solid var(--line); border-radius: 14px; padding: 0; width: min(820px, calc(100vw - 32px)); max-height: calc(100vh - 64px); background: var(--card); color: var(--ink); box-shadow: 0 24px 80px rgb(0 0 0 / .25); }
+dialog[open] { display: flex; flex-direction: column; }
+dialog::backdrop { background: rgb(0 0 0 / .35); }
+.dlg-head { padding: 18px 20px 12px; border-bottom: 1px solid var(--line-2); }
+.dlg-head h2 { margin: 0; font-size: 16px; }
+.dlg-head p { margin: 4px 0 0; color: var(--muted); font-size: 13px; max-width: 70ch; }
+.dlg-head code { color: var(--ink); }
+#code { margin: 0; padding: 14px 20px; overflow: auto; font-size: 12px; line-height: 1.55; color: var(--ink-2); background: var(--line-2); flex: 1; white-space: pre; }
+.dlg-foot { display: flex; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--line-2); align-items: center; }
+.dlg-foot .status { margin: 0 auto 0 0; }
+.dlg-foot .btn.primary { margin-left: 0; }
+
+.empty { padding: 40px 24px; text-align: center; color: var(--muted); }
+
+@media (max-width: 1000px) {
+  .main { grid-template-columns: 1fr; }
+  .recs { min-height: 0; }
+  .recs-inner { position: static; }
+  #recList { max-height: 70vh; }
+}
+@media (max-width: 720px) {
+  .stats { grid-template-columns: 1fr 1fr; }
+  .stat:nth-child(3) { border-left: 0; }
+  .stat:nth-child(n+3) { border-top: 1px solid var(--line); }
+  .stat .value b { font-size: 22px; }
+  #tm { height: 62vh; }
+  .masthead .sub { display: block; margin: 2px 0 0; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<header class="masthead">
+  <div><h1>Storage</h1><span class="sub" id="sub"></span></div>
+  <p class="rescan">Run <code>python3 scan.py</code> again after cleaning up</p>
+</header>
+
+<section class="card stats" id="stats" aria-label="Summary"></section>
+
+<div class="main">
+  <section class="card explorer" aria-labelledby="exp-h">
+    <div class="panel-head">
+      <div>
+        <h2 id="exp-h">Explorer</h2>
+        <p>Your home folder, sized by space used. Click a tile to open it.</p>
+      </div>
+      <div class="seg" role="group" aria-label="Color tiles by">
+        <button type="button" data-mode="category" aria-pressed="true">Category</button>
+        <button type="button" data-mode="cleanup" aria-pressed="false">Cleanup</button>
+      </div>
+    </div>
+    <div class="crumbs"><nav id="crumbs" aria-label="Folder path"></nav><span class="num" id="viewSize"></span></div>
+    <div class="tm-wrap"><div id="tm"></div></div>
+    <div class="legend" id="legend"></div>
+    <div id="unreadable"></div>
+  </section>
+
+  <aside class="card recs" aria-labelledby="rec-h">
+    <div class="recs-inner">
+      <div class="panel-head">
+        <div>
+          <h2 id="rec-h">Recommendations</h2>
+          <p>Select items to build a cleanup script</p>
+        </div>
+      </div>
+      <div id="recList"></div>
+      <div class="recs-foot">
+        <div class="line"><span><b id="selSize">0 GB</b> selected, <span id="selCount">0 items</span></span><button type="button" class="linkbtn" id="clearBtn">Clear</button></div>
+        <div class="actions">
+          <button type="button" class="btn" id="safeBtn">Select safe</button>
+          <button type="button" class="btn" id="previewBtn">Preview</button>
+          <button type="button" class="btn primary" id="copyBtn">Copy script</button>
+        </div>
+        <p class="status" id="status" role="status"></p>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<dialog id="dlg" aria-labelledby="dlg-h">
+  <div class="dlg-head">
+    <h2 id="dlg-h">Cleanup script</h2>
+    <p>Copy it and run <code>pbpaste | bash</code> in Terminal, or save it and run <code>bash ~/Downloads/cleanup.sh</code>. It shows the total and asks before deleting anything.</p>
+  </div>
+  <pre id="code"></pre>
+  <div class="dlg-foot">
+    <p class="status" id="dlgStatus" role="status"></p>
+    <button type="button" class="btn" id="closeBtn">Close</button>
+    <button type="button" class="btn" id="saveBtn">Save cleanup.sh</button>
+    <button type="button" class="btn primary" id="dlgCopyBtn">Copy script</button>
+  </div>
+</dialog>
+
+<div id="tip" hidden></div>
+
+<script>
+const DATA = /*__DATA__*/null;
+
+const CATS = { media: "Documents & media", other: "Apps & other", code: "Code projects", sdk: "SDKs & toolchains", ai: "AI models", cache: "Caches" };
+const STORE = "storage-report.selection";
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+function fmt(n) {
+  if (n >= 1e11) return Math.round(n / 1e9) + " GB";
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + " GB";
+  if (n >= 1e6) return Math.round(n / 1e6) + " MB";
+  if (n >= 1e3) return Math.round(n / 1e3) + " KB";
+  return n + " B";
+}
+const home = (p) => "~/" + p;
+function ago(days) {
+  if (days < 1) return "today";
+  if (days < 30) return days === 1 ? "1 day" : days + " days";
+  if (days < 365) { const m = Math.round(days / 30); return m === 1 ? "1 month" : m + " months"; }
+  const y = Math.round(days / 36.5) / 10; return (y === 1 ? "1 year" : y + " years");
+}
+const monthYear = (t) => new Date(t * 1000).toLocaleDateString(undefined, { month: "short", year: "numeric" });
+
+if (!DATA) {
+  document.body.innerHTML = '<p class="empty">This is the report template. Run <code>python3 scan.py</code> to scan your Mac and open the report.</p>';
+  throw new Error("no data");
+}
+
+/* ---------- model ---------- */
+
+(function index(node, path, parent) {
+  node.path = path; node.parent = parent;
+  (node.c || []).forEach((k) => index(k, k.o ? null : (path ? path + "/" + k.n : k.n), node));
+})(DATA.tree, "", null);
+
+const RECS = new Map(DATA.recs.map((r) => [r.id, { ...r, entries: [], total: 0 }]));
+for (const e of DATA.entries) {
+  const r = RECS.get(e.r);
+  if (!r) continue;
+  e.key = e.r + "|" + (e.cmd || e.p);
+  e.rec = r;
+  r.entries.push(e);
+  r.total += e.s;
+}
+const shown = [...RECS.values()].filter((r) => r.total >= 10e6).sort((a, b) => b.total - a.total);
+const TIERS = [
+  { id: "safe", label: "Safe to remove", recs: shown.filter((r) => r.tier === "safe") },
+  { id: "review", label: "Review first", recs: shown.filter((r) => r.tier === "review") },
+];
+const SELECTABLE = shown.filter((r) => !r.manual).flatMap((r) => r.entries);
+const BY_KEY = new Map(SELECTABLE.map((e) => [e.key, e]));
+const BY_PATH = new Map();
+for (const r of shown) for (const e of r.entries) (BY_PATH.get(e.p) || BY_PATH.set(e.p, []).get(e.p)).push(e);
+
+const S = { view: DATA.tree, mode: "category", sel: new Set(), hotRec: null };
+
+function loadSelection() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORE));
+    if (Array.isArray(saved)) { saved.forEach((k) => BY_KEY.has(k) && S.sel.add(k)); return; }
+  } catch (_) { /* first visit or storage blocked */ }
+  for (const t of TIERS) if (t.id === "safe") t.recs.forEach((r) => r.entries.forEach((e) => S.sel.add(e.key)));
+}
+function saveSelection() {
+  try { localStorage.setItem(STORE, JSON.stringify([...S.sel])); } catch (_) {}
+}
+const selectedEntries = () => [...S.sel].map((k) => BY_KEY.get(k)).filter(Boolean);
+const selectedBytes = () => selectedEntries().reduce((a, e) => a + e.s, 0);
+
+/** Entries whose folder is this path or one of its ancestors. */
+function covering(path) {
+  if (path == null || path === "") return [];
+  const out = [];
+  let i = -1;
+  do {
+    i = path.indexOf("/", i + 1);
+    const es = BY_PATH.get(i < 0 ? path : path.slice(0, i));
+    if (es) out.push(...es);
+  } while (i >= 0);
+  return out;
+}
+function selectedInside(path, sel) {
+  if (path == null) return 0;
+  const pre = path ? path + "/" : "";
+  let n = 0;
+  for (const e of sel) if (e.p.startsWith(pre) && e.p !== path) n += e.s;
+  return n;
+}
+
+/* ---------- stats ---------- */
+
+function renderStats() {
+  const { total, free } = DATA.disk;
+  const used = total - free;
+  const sel = selectedBytes();
+  const sum = (t) => t.recs.filter((r) => !r.manual).reduce((a, r) => a + r.total, 0);
+  const [safe, review] = TIERS;
+  const notScanned = Math.max(0, used - DATA.scanned);
+  const count = (n) => n + (n === 1 ? " item" : " items");
+  $("#stats").innerHTML = `
+    <div class="stat"><div class="label">Free after cleanup</div>
+      <div class="value"><b>${fmt(free + sel)}</b>${sel ? `<span class="up">+${fmt(sel)}</span>` : `<span>free now</span>`}</div></div>
+    <div class="stat"><div class="label"><i style="background:var(--safe)"></i>Safe to remove</div>
+      <div class="value"><b>${fmt(sum(safe))}</b><span>${count(safe.recs.length)}</span></div></div>
+    <div class="stat"><div class="label"><i style="background:var(--review)"></i>Needs review</div>
+      <div class="value"><b>${fmt(sum(review))}</b><span>${count(review.recs.length)}</span></div></div>
+    <div class="stat"><div class="label">Not scanned</div>
+      <div class="value"><b>${fmt(notScanned)}</b><span>system &amp; apps</span></div></div>
+    <div class="capacity">
+      <span>${fmt(used - sel)} used</span>
+      <div class="bar" role="img" aria-label="${fmt(used)} of ${fmt(total)} used, ${fmt(sel)} selected for cleanup">
+        <div class="used" style="width:${((used - sel) / total) * 100}%"></div>
+        <div class="freed" style="width:${(sel / total) * 100}%"></div>
+      </div>
+      <span>${fmt(total)} disk</span>
+    </div>`;
+}
+
+/* ---------- treemap ---------- */
+
+function squarify(values, x, y, w, h) {
+  const out = values.map(() => ({ x, y, w: 0, h: 0 }));
+  const total = values.reduce((a, b) => a + b, 0);
+  if (!total || w <= 0 || h <= 0) return out;
+  const order = values.map((_, i) => i).sort((a, b) => values[b] - values[a]);
+  const areas = order.map((i) => (values[i] * w * h) / total);
+  let rx = x, ry = y, rw = w, rh = h, row = [];
+  const worst = (r, side) => {
+    let s = 0, mx = 0, mn = Infinity;
+    for (const a of r) { s += a; mx = Math.max(mx, a); mn = Math.min(mn, a); }
+    return Math.max((side * side * mx) / (s * s), (s * s) / (side * side * mn));
+  };
+  const flush = () => {
+    const s = row.reduce((a, j) => a + areas[j], 0);
+    if (rw >= rh) {
+      const cw = s / rh; let cy = ry;
+      for (const j of row) { const hh = areas[j] / cw; out[order[j]] = { x: rx, y: cy, w: cw, h: hh }; cy += hh; }
+      rx += cw; rw -= cw;
+    } else {
+      const ch = s / rw; let cx = rx;
+      for (const j of row) { const ww = areas[j] / ch; out[order[j]] = { x: cx, y: ry, w: ww, h: ch }; cx += ww; }
+      ry += ch; rh -= ch;
+    }
+    row = [];
+  };
+  let i = 0;
+  while (i < areas.length) {
+    if (areas[i] <= 0) { i++; continue; }
+    const side = Math.min(rw, rh);
+    const cur = row.map((j) => areas[j]);
+    if (!row.length || worst([...cur, areas[i]], side) <= worst(cur, side)) row.push(i++);
+    else flush();
+  }
+  if (row.length) flush();
+  return out;
+}
+const inset = (r, d) => ({ x: r.x + d, y: r.y + d, w: r.w - 2 * d, h: r.h - 2 * d });
+
+/** Skip through folders that hold almost nothing but one subfolder (.ollama → models → blobs). */
+function unwrap(node) {
+  while (node.c && node.c[0] && node.c[0].c && node.c[0].s >= node.s * 0.9) node = node.c[0];
+  return node;
+}
+
+let TILES = [];
+let SEL_CACHE = [];
+
+function tileClass(node, level, leaf) {
+  const cls = ["tile", "cat-" + node.t];
+  if (level) cls.push("in");
+  else if (leaf) cls.push("leaf0");
+  if (node.o) cls.push("agg");
+  if (node.c && !node.o) cls.push("can-open");
+  const cov = covering(node.path);
+  if (cov.length) {
+    cls.push("tier-" + cov[cov.length - 1].rec.tier);
+    if (cov.some((e) => S.sel.has(e.key))) cls.push("sel");
+    if (S.hotRec && cov.some((e) => e.rec.id === S.hotRec)) cls.push("hl");
+  } else if (node.path != null) {
+    const pre = node.path + "/";
+    if (S.hotRec && RECS.get(S.hotRec).entries.some((e) => e.p.startsWith(pre))) cls.push("hl-in");
+    if (S.mode === "cleanup") {
+      const by = { safe: 0, review: 0 };
+      for (const e of SELECTABLE) if (e.p.startsWith(pre)) by[e.rec.tier] += e.s;
+      if (by.safe + by.review >= node.s / 2) cls.push("tier-" + (by.safe >= by.review ? "safe" : "review"));
+    }
+  }
+  return cls.join(" ");
+}
+
+function label(node) {
+  return node.o ? node.n : (node.l || node.n);
+}
+
+function leafHTML(node, r) {
+  const name = esc(label(node));
+  if (r.w >= 64 && r.h >= 48 && !node.o) {
+    const fs = Math.max(12, Math.min(26, Math.sqrt(r.w * r.h) / 8.5));
+    return `<div class="leaf"><span class="tn">${name}</span><span class="big" style="font-size:${fs.toFixed(1)}px">${fmt(node.s)}</span></div>`;
+  }
+  if (r.w >= 44 && r.h >= 24) return `<div class="leaf"><span class="tn">${name}</span></div>`;
+  return "";
+}
+
+function drawTile(parent, node, r, level) {
+  if (r.w < 4 || r.h < 4) return;
+  const el = document.createElement("div");
+  el.dataset.i = TILES.push(node) - 1;
+  el.style.cssText = `left:${r.x}px;top:${r.y}px;width:${r.w}px;height:${r.h}px`;
+  const inner = level === 0 ? unwrap(node) : node;
+  const nest = level === 0 && inner.c && r.w >= 110 && r.h >= 90;
+  el.className = tileClass(node, level, !nest);
+  if (nest) {
+    el.classList.add("group");
+    el.innerHTML = `<div class="th"><span class="tn">${esc(label(node))}</span><span class="ts">${fmt(node.s)}</span></div>`;
+    const kids = inner.c.filter((k) => k.s > 0);
+    const rects = squarify(kids.map((k) => k.s), 6, 27, r.w - 14, r.h - 35);
+    kids.forEach((k, i) => drawTile(el, k, inset(rects[i], 2), 1));
+  } else {
+    el.innerHTML = leafHTML(node, r);
+  }
+  const share = node.path != null && !el.classList.contains("sel") ? selectedInside(node.path, SEL_CACHE) / node.s : 0;
+  if (share > 0) el.insertAdjacentHTML("beforeend", `<i class="partial" style="width:${Math.max(4, share * 100)}%"></i>`);
+  if (level === 0 && node.c && !node.o) {
+    el.tabIndex = 0;
+    el.setAttribute("role", "button");
+    el.setAttribute("aria-label", `Open ${label(node)}, ${fmt(node.s)}`);
+  }
+  parent.appendChild(el);
+}
+
+function renderTreemap() {
+  const tm = $("#tm");
+  tm.className = "mode-" + S.mode;
+  TILES = [];
+  SEL_CACHE = selectedEntries();
+  tm.replaceChildren();
+  const kids = (S.view.c || []).filter((k) => k.s > 0);
+  if (!kids.length) {
+    tm.innerHTML = '<div class="tm-empty">Nothing here is larger than 8 MB.</div>';
+  } else {
+    const rects = squarify(kids.map((k) => k.s), 0, 0, tm.clientWidth, tm.clientHeight);
+    kids.forEach((k, i) => drawTile(tm, k, inset(rects[i], 3), 0));
+  }
+  renderCrumbs();
+  renderLegend();
+}
+
+function renderCrumbs() {
+  const chain = [];
+  for (let n = S.view; n; n = n.parent) chain.unshift(n);
+  $("#crumbs").innerHTML = chain.map((n, i) => {
+    const last = i === chain.length - 1;
+    const name = i === 0 ? "~ Home" : esc(label(n));
+    return (i ? '<span class="sep">/</span>' : "") +
+      `<button type="button" data-depth="${i}"${last ? ' aria-current="page"' : ""}>${name}</button>`;
+  }).join("");
+  $("#viewSize").textContent = fmt(S.view.s);
+}
+
+function renderLegend() {
+  const present = new Set();
+  (function walk(n, d) { present.add(n.t); if (d < 2) (n.c || []).forEach((k) => walk(k, d + 1)); })(S.view, 0);
+  $("#legend").innerHTML = S.mode === "category"
+    ? Object.entries(CATS).filter(([k]) => present.has(k)).map(([k, v]) => `<span><i class="cat-${k}"></i>${v}</span>`).join("")
+      + `<span><i class="hatch"></i>Selected for cleanup</span>`
+    : `<span><i style="--c:var(--safe)"></i>Safe to remove</span><span><i style="--c:var(--review)"></i>Review first</span>`
+      + `<span><i style="--c:var(--c-other)"></i>Keep</span><span><i class="hatch"></i>Selected for cleanup</span>`;
+}
+
+function open(node) {
+  if (!node || !node.c) return;
+  S.view = node;
+  hideTip();
+  renderTreemap();
+}
+
+/* ---------- tooltip ---------- */
+
+const tip = $("#tip");
+function showTip(node, x, y) {
+  const cov = covering(node.path);
+  const parent = node.parent;
+  const pct = parent && parent.s ? Math.round((node.s / parent.s) * 1000) / 10 : 100;
+  let rec = "";
+  if (cov.length) {
+    const e = cov[cov.length - 1];
+    rec = `${esc(e.rec.title)}: ${S.sel.has(e.key) ? "selected for cleanup" : e.rec.tier === "safe" ? "safe to remove" : "review first"}`;
+  } else if (node.path != null) {
+    const inside = selectedInside(node.path, SEL_CACHE);
+    if (inside) rec = `${fmt(inside)} selected for cleanup inside`;
+  }
+  tip.innerHTML = `<div><b>${esc(label(node))}</b> ${fmt(node.s)} <span style="opacity:.7">(${pct}% of ${esc(parent ? (parent.parent ? label(parent) : "Home") : "disk")})</span></div>`
+    + (node.path ? `<div class="p">~/${esc(node.path)}</div>` : node.o ? `<div class="p">${node.o} files and folders under 8 MB</div>` : "")
+    + `<div class="r">${CATS[node.t] || ""}${rec ? "<br>" + rec : ""}</div>`;
+  tip.hidden = false;
+  const b = tip.getBoundingClientRect();
+  tip.style.left = Math.min(x + 14, innerWidth - b.width - 8) + "px";
+  tip.style.top = (y + 18 + b.height > innerHeight ? y - b.height - 10 : y + 18) + "px";
+}
+function hideTip() { tip.hidden = true; }
+
+/* ---------- recommendations ---------- */
+
+const CHEV = '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const SHOW_PATHS = 150;
+
+function entryMeta(e) {
+  const bits = [];
+  if (e.r === "node_modules") bits.push(e.d == null ? "" : e.d < 14 ? "used recently" : "idle " + ago(e.d));
+  if (e.m) bits.push((e.r === "iosbackups" ? "backed up " : "modified ") + monthYear(e.m));
+  if (e.cmd) bits.push(e.cmd);
+  else if (e.r !== "node_modules") bits.push(home(e.p));
+  return bits.filter(Boolean).join("  ");
+}
+
+function renderRecs() {
+  const list = $("#recList");
+  if (!shown.length) {
+    list.innerHTML = '<p class="empty">Nothing worth cleaning up was found.</p>';
+    return;
+  }
+  list.innerHTML = TIERS.filter((t) => t.recs.length).map((t) => `
+    <div class="group-head"><span class="pill ${t.id}">${t.label}</span><span class="num">${fmt(t.recs.filter((r) => !r.manual).reduce((a, r) => a + r.total, 0))}</span></div>
+    ${t.recs.map(recHTML).join("")}`).join("");
+}
+
+function recHTML(r) {
+  const sorted = r.entries.slice().sort((a, b) => b.s - a.s);
+  const more = sorted.slice(SHOW_PATHS);
+  const id = "rec-" + r.id;
+  const box = r.manual
+    ? '<span class="manual-mark" title="Not included in the script"></span>'
+    : `<input type="checkbox" data-rec="${r.id}" aria-label="Select ${esc(r.title)}">`;
+  const size = (r.approx ? "<small>up to </small>" : "") + fmt(r.total);
+  const paths = r.manual ? "" : `<ul class="paths">${sorted.slice(0, SHOW_PATHS).map((e) => `
+      <li><label><input type="checkbox" data-key="${esc(e.key)}">
+        <span class="pl"><span class="pn">${esc(e.r === "node_modules" ? home(e.label) : e.label || home(e.p))}</span><span class="pm">${esc(entryMeta(e))}</span></span>
+        <span class="ps">${fmt(e.s)}</span></label></li>`).join("")}
+      ${more.length ? `<li class="more">and ${more.length} more, ${fmt(more.reduce((a, e) => a + e.s, 0))}. Selecting the group includes them.</li>` : ""}
+    </ul>`;
+  return `
+    <div class="rec" data-id="${r.id}">
+      <div class="rec-row">
+        ${box}
+        <div><div class="rec-title">${esc(r.title)}</div><div class="rec-hint">${esc(r.hint)}</div></div>
+        <div class="rec-size">${size}</div>
+        <button type="button" class="chev" aria-expanded="false" aria-controls="${id}" aria-label="Show details for ${esc(r.title)}">${CHEV}</button>
+      </div>
+      <div class="rec-detail" id="${id}" hidden>
+        <p>${esc(r.desc)}</p>
+        ${r.manual ? `<p class="how">${esc(r.manual)}</p>` : ""}
+        ${paths}
+      </div>
+    </div>`;
+}
+
+function syncChecks() {
+  for (const box of document.querySelectorAll("#recList input[data-rec]")) {
+    const r = RECS.get(box.dataset.rec);
+    const n = r.entries.filter((e) => S.sel.has(e.key)).length;
+    box.checked = n > 0 && n === r.entries.length;
+    box.indeterminate = n > 0 && n < r.entries.length;
+  }
+  for (const box of document.querySelectorAll("#recList input[data-key]")) box.checked = S.sel.has(box.dataset.key);
+  const sel = selectedEntries();
+  const recCount = new Set(sel.map((e) => e.rec.id)).size;
+  $("#selSize").textContent = fmt(sel.reduce((a, e) => a + e.s, 0));
+  $("#selCount").textContent = recCount + (recCount === 1 ? " item" : " items");
+  $("#copyBtn").disabled = $("#previewBtn").disabled = !sel.length;
+  $("#clearBtn").hidden = !sel.length;
+}
+
+function changed() {
+  saveSelection();
+  syncChecks();
+  renderStats();
+  renderTreemap();
+  setStatus("");
+}
+
+/* ---------- script ---------- */
+
+const sq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+
+function buildScript() {
+  const sel = selectedEntries();
+  const total = sel.reduce((a, e) => a + e.s, 0);
+  const when = new Date(DATA.generated * 1000).toLocaleString();
+  const L = [
+    "#!/bin/bash",
+    `# Storage cleanup: ${sel.length} paths, about ${fmt(total)}.`,
+    `# Built from the storage report scanned ${when}. Review before running.`,
+    "set -u",
+    "",
+    "del() {",
+    '  case "$1" in "$HOME"/?*) ;; *) echo "  skipped $1 (outside your home folder)"; return ;; esac',
+    '  if [ ! -e "$1" ]; then echo "  already gone: ~${1#"$HOME"}"; return; fi',
+    '  chmod -R u+w "$1" 2>/dev/null',
+    '  rm -rf -- "$1" && echo "  removed ~${1#"$HOME"}"',
+    "}",
+    "",
+    `printf '%s' ${sq(`Delete ${sel.length} paths, about ${fmt(total)}? [y/N] `)}`,
+    "read -r answer </dev/tty",
+    'case "$answer" in y|Y|yes|YES) ;; *) echo "Nothing deleted."; exit 0 ;; esac',
+  ];
+  for (const r of shown) {
+    const es = sel.filter((e) => e.rec === r);
+    if (!es.length) continue;
+    L.push("", `echo ${sq(`${r.title} (${fmt(es.reduce((a, e) => a + e.s, 0))})`)}`);
+    for (const e of es) {
+      if (e.cmd) L.push(`${e.cmd} || echo ${sq(`  failed: ${e.cmd}`)}`);
+      else L.push(`del "$HOME"/${sq(e.p)}`);
+    }
+    if (r.id === "worktrees") L.push("# Afterwards, run `git worktree prune` in each repo these came from.");
+  }
+  L.push("", "echo", `df -H "$HOME" | awk 'NR==2 {print "Free space now: " $4}'`, "");
+  return L.join("\n");
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (_) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.cssText = "position:fixed;opacity:0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok;
+  }
+}
+function setStatus(html, el = $("#status")) { el.innerHTML = html; }
+const COPIED = "Copied. In Terminal, run <code>pbpaste | bash</code>";
+
+/* ---------- events ---------- */
+
+document.querySelector(".seg").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button[data-mode]");
+  if (!b) return;
+  S.mode = b.dataset.mode;
+  document.querySelectorAll(".seg button").forEach((x) => x.setAttribute("aria-pressed", x === b));
+  renderTreemap();
+});
+
+$("#crumbs").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button[data-depth]");
+  if (!b) return;
+  let n = S.view, up = [];
+  for (; n; n = n.parent) up.unshift(n);
+  open(up[+b.dataset.depth]);
+});
+
+const tm = $("#tm");
+tm.addEventListener("click", (ev) => {
+  const el = ev.target.closest(".tile");
+  if (!el) return;
+  const node = TILES[el.dataset.i];
+  if (node.c && !node.o) open(node);
+  else if (el.parentElement.closest(".tile")) {
+    const outer = TILES[el.parentElement.closest(".tile").dataset.i];
+    if (outer.c) open(outer);
+  }
+});
+tm.addEventListener("keydown", (ev) => {
+  if ((ev.key === "Enter" || ev.key === " ") && ev.target.classList.contains("tile")) {
+    ev.preventDefault();
+    open(TILES[ev.target.dataset.i]);
+    tm.querySelector(".tile[tabindex]")?.focus();
+  }
+});
+tm.addEventListener("mousemove", (ev) => {
+  const el = ev.target.closest(".tile");
+  el ? showTip(TILES[el.dataset.i], ev.clientX, ev.clientY) : hideTip();
+});
+tm.addEventListener("mouseleave", hideTip);
+document.addEventListener("keydown", (ev) => {
+  if ((ev.key === "Escape" || ev.key === "Backspace") && !$("#dlg").open && S.view.parent
+      && !/INPUT|TEXTAREA/.test(document.activeElement.tagName)) {
+    ev.preventDefault();
+    open(S.view.parent);
+  }
+});
+
+const list = $("#recList");
+list.addEventListener("change", (ev) => {
+  const t = ev.target;
+  if (t.dataset.rec) {
+    const r = RECS.get(t.dataset.rec);
+    const all = r.entries.every((e) => S.sel.has(e.key));
+    r.entries.forEach((e) => (all ? S.sel.delete(e.key) : S.sel.add(e.key)));
+  } else if (t.dataset.key) {
+    t.checked ? S.sel.add(t.dataset.key) : S.sel.delete(t.dataset.key);
+  }
+  changed();
+});
+list.addEventListener("click", (ev) => {
+  const row = ev.target.closest(".rec-row");
+  if (!row || ev.target.matches("input")) return;
+  const rec = row.parentElement;
+  const detail = rec.querySelector(".rec-detail");
+  const opening = detail.hidden;
+  detail.hidden = !opening;
+  rec.classList.toggle("open", opening);
+  rec.querySelector(".chev").setAttribute("aria-expanded", opening);
+});
+list.addEventListener("mouseover", (ev) => {
+  const rec = ev.target.closest(".rec");
+  const id = rec ? rec.dataset.id : null;
+  if (id === S.hotRec) return;
+  list.querySelector(".rec.hot")?.classList.remove("hot");
+  rec?.classList.add("hot");
+  S.hotRec = id;
+  renderTreemap();
+});
+list.addEventListener("mouseleave", () => {
+  list.querySelector(".rec.hot")?.classList.remove("hot");
+  S.hotRec = null;
+  renderTreemap();
+});
+
+$("#safeBtn").addEventListener("click", () => {
+  S.sel.clear();
+  TIERS[0].recs.forEach((r) => r.entries.forEach((e) => S.sel.add(e.key)));
+  changed();
+});
+$("#clearBtn").addEventListener("click", () => { S.sel.clear(); changed(); });
+$("#copyBtn").addEventListener("click", async () => {
+  setStatus((await copyText(buildScript())) ? COPIED : "Couldn't copy. Use Preview and save the script instead.");
+});
+$("#previewBtn").addEventListener("click", () => {
+  $("#code").textContent = buildScript();
+  setStatus("", $("#dlgStatus"));
+  $("#dlg").showModal();
+});
+$("#closeBtn").addEventListener("click", () => $("#dlg").close());
+$("#dlg").addEventListener("click", (ev) => { if (ev.target === ev.currentTarget) ev.currentTarget.close(); });
+$("#dlgCopyBtn").addEventListener("click", async () => {
+  setStatus((await copyText(buildScript())) ? COPIED : "Couldn't copy. Save the script instead.", $("#dlgStatus"));
+});
+$("#saveBtn").addEventListener("click", () => {
+  const url = URL.createObjectURL(new Blob([buildScript()], { type: "text/x-shellscript" }));
+  const a = Object.assign(document.createElement("a"), { href: url, download: "cleanup.sh" });
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  setStatus("Saved to Downloads. Run <code>bash ~/Downloads/cleanup.sh</code>", $("#dlgStatus"));
+});
+
+let raf = 0;
+new ResizeObserver(() => { cancelAnimationFrame(raf); raf = requestAnimationFrame(renderTreemap); }).observe(tm);
+
+/* ---------- init ---------- */
+
+(function init() {
+  const d = new Date(DATA.generated * 1000);
+  const when = d.toLocaleDateString(undefined, { day: "numeric", month: "short" }) + " at " + d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  $("#sub").textContent = `${DATA.computer || "This Mac"}, ${fmt(DATA.disk.total)} disk. Scanned ${when} in ${Math.round(DATA.seconds)} s.`;
+  if (DATA.unreadable.length) {
+    $("#unreadable").innerHTML = `<details class="note"><summary>${DATA.unreadable.length} folders couldn't be read, so they count as 0 bytes. To include them, give your terminal app Full Disk Access in System Settings, Privacy &amp; Security, then scan again.</summary>
+      <ul>${DATA.unreadable.map((p) => `<li>~/${esc(p)}</li>`).join("")}</ul></details>`;
+  }
+  loadSelection();
+  renderRecs();
+  syncChecks();
+  renderStats();
+  renderTreemap();
+})();
+</script>
+</body>
+</html>
