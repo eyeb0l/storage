@@ -1,0 +1,20 @@
+[package]
+name = "storage-app"
+description = "Storage: see and clear what coding agents and dev tools leave on your Mac."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "storage"
+
+[[bin]]
+name = "storage"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+storage-core = { path = "../crates/storage-core" }
+tauri = { version = "2", features = [] }
+serde.workspace = true
+serde_json.workspace = true

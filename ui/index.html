@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Storage</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="titlebar" data-tauri-drag-region></div>
+
+<main class="wrap">
+  <section class="card hero" id="hero" aria-label="Disk overview">
+    <canvas class="fx" id="fx" aria-hidden="true"></canvas>
+    <header class="hero-head">
+      <h1 class="used"><b id="usedNum" class="num">0.0 GB</b> <span id="usedOf"></span></h1>
+      <button type="button" class="ghost" id="rescan">
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.2 6.2A5.5 5.5 0 0 0 3 4.6M2.8 9.8A5.5 5.5 0 0 0 13 11.4M3 1.8v2.9h2.9M13 14.2v-2.9h-2.9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Rescan
+      </button>
+    </header>
+    <p class="status" id="status" role="status" aria-live="polite"></p>
+    <div class="bar-slot" id="barSlot" role="img" aria-label="Disk usage by category"></div>
+    <div class="legend" id="legend"></div>
+    <footer class="suggest" id="suggest"></footer>
+  </section>
+
+  <nav class="tabs" role="tablist" aria-label="View">
+    <button type="button" role="tab" data-tab="clean" aria-selected="true">Clean up</button>
+    <button type="button" role="tab" data-tab="explore" aria-selected="false">Explore</button>
+  </nav>
+
+  <div id="cleanView">
+    <section class="card panel" id="wtPanel" hidden aria-labelledby="wt-h">
+      <div class="panel-head">
+        <div>
+          <h2 id="wt-h">Agent worktrees</h2>
+          <p>Checkouts coding agents made for each task. Moving one to the Trash keeps its branch and commits.</p>
+        </div>
+        <button type="button" class="btn small" id="selectMerged" title="Merged, or its remote branch was deleted, with nothing uncommitted and not used in the last two hours">Select finished</button>
+      </div>
+      <div id="wtList"></div>
+    </section>
+
+    <section class="card panel" id="recPanel" hidden aria-labelledby="rec-h">
+      <div class="panel-head">
+        <div>
+          <h2 id="rec-h">Everything you can clear</h2>
+          <p>Safe items are deleted and rebuilt by your tools when needed. Review items go to the Trash.</p>
+        </div>
+      </div>
+      <div id="recList"></div>
+      <div id="unreadable"></div>
+    </section>
+  </div>
+
+  <section class="card panel explore" id="exploreView" hidden aria-label="Explore">
+    <div class="crumbs">
+      <nav id="crumbs" aria-label="Folder path"></nav>
+      <span class="grow"></span>
+      <span class="num muted" id="viewSize"></span>
+      <button type="button" class="btn small" id="revealView">Show in Finder</button>
+    </div>
+    <div class="tm-wrap"><div id="tm"></div></div>
+    <p class="note">Click a folder to open it, Escape to go back, ⌥-click to show it in Finder. Tick a tile to add it to your selection.</p>
+  </section>
+</main>
+
+<div class="selbar" id="selbar" hidden>
+  <span><b class="num" id="selSize">0 GB</b> <span id="selCount"></span></span>
+  <span class="grow"></span>
+  <button type="button" class="linkbtn" id="clearSel">Deselect</button>
+  <button type="button" class="btn primary" id="reviewBtn">Review &amp; clear</button>
+</div>
+
+<dialog id="confirm" aria-labelledby="confirm-h">
+  <form method="dialog">
+    <h2 id="confirm-h">Clear <span id="confirmSize"></span>?</h2>
+    <div id="confirmBody"></div>
+    <div class="dlg-foot">
+      <button type="submit" class="btn" value="cancel">Cancel</button>
+      <button type="submit" class="btn primary" value="ok" id="confirmOk">Clear</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="tip" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>
