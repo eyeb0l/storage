@@ -1,2 +1,4 @@
 /target
 .DS_Store
+# Written by the old Python scanner; it lists your home folder. Older checkouts may still have one.
+report.html
