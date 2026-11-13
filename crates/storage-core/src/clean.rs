@@ -3,7 +3,8 @@
 //! How an entry goes depends on its recommendation's tier:
 //! - `Safe` (regenerated automatically): deleted outright.
 //! - `Review` (the user's call): moved to the Trash, so it can be put back.
-//! - Entries owned by a tool (simulators, Ollama models, Docker) run that tool's own command.
+//! - Entries owned by a tool (simulators, Ollama models) run that tool's own command.
+//! - Docker cleanup is refused: the scan can't bound what a global prune would remove.
 //! - The Trash itself is emptied: all of it, or, when macOS hides it from Storage (no Full Disk
 //!   Access), what Storage moved there itself.
 //!
@@ -401,6 +402,16 @@ pub fn clean_noting(
     move_to_trash: &dyn Fn(&Path) -> Result<(), String>,
     trashed: &mut Vec<Trashed>,
 ) -> Result<Method, String> {
+    // The scan measured Docker.raw, not the objects in the engine. Even a fresh scan can't
+    // authorise a global prune: it can remove objects nobody was shown, including ones added
+    // after confirmation. Refuse before choosing a method, so a missing command can't cause
+    // the disk image itself to be trashed either. `hold` alone allows a manual override in the UI.
+    if e.rec == "docker" {
+        return Err(format!(
+            "Docker cleanup is unavailable: the scan can't show what a global prune would remove; {} instead",
+            rules::DOCKER_CLEANUP_HOLD
+        ));
+    }
     let how = method(e);
     let fail = |err: io::Error| format!("{}: {err}", shown(&e.path));
     match how {

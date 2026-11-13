@@ -50,8 +50,12 @@ There are three ways out, and the list is grouped by them:
   caches.
 - **Moved to the Trash**: anything that is your call, so it can be put back. That includes worktrees, app
   caches, logs, downloads and toolchains.
-- **Removed by its own tool**: simulators, Docker data and local models are removed by `simctl`, Docker and
-  Ollama, which can't be undone.
+- **Removed by its own tool**: simulators and local models are removed by `simctl` and Ollama, which can't
+  be undone.
+
+Docker's disk usage is reported, but cleanup is held back. The scan measures Docker Desktop's disk image,
+not the objects a global prune would remove, so even a fresh scan can't make that operation safe. Storage
+refuses Docker cleanup; review and clean up in Docker Desktop instead.
 
 Nothing is cleared without a confirmation that names every item and every risk.
 

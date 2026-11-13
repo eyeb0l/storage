@@ -924,7 +924,11 @@ impl Scanner {
                 ..Default::default()
             };
         if let Some(&id) = rules::FIXED_FILES.get(crel) {
-            self.push(entry(id, None, rules::command(id), None));
+            let mut e = entry(id, None, rules::command(id), None);
+            if id == "docker" {
+                e.hold = Some(rules::DOCKER_CLEANUP_HOLD.to_owned());
+            }
+            self.push(e);
             return;
         }
         if crel.starts_with('/') {

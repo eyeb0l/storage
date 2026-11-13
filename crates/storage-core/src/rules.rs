@@ -304,7 +304,7 @@ pub static RECS: &[Rec] = &[
             Cat::Containers,
             "Docker images & build cache",
             "~/Library/Containers/com.docker.docker",
-            "Docker Desktop's disk image. Runs docker system prune -a on Docker Desktop's own engine, which removes stopped containers, unused images and build cache for good, but keeps volumes. Docker must be running.",
+            "Docker Desktop's disk image, not a list of removable objects. Storage won't run a global prune because it could remove objects you weren't shown. Review and clean up in Docker Desktop instead.",
         )
     },
     review(
@@ -531,7 +531,8 @@ pub static FIXED_FILES: LazyLock<HashMap<&'static str, &'static str>> =
 pub fn command(rec: &str) -> Option<Vec<String>> {
     match rec {
         // The image measured is Docker Desktop's, so prune that engine and not whatever context
-        // (possibly a remote host) is current.
+        // (possibly a remote host) is current. Cleanup currently refuses this command until the
+        // scan can show and bound its targets; retain the local context for any future use.
         "docker" => {
             Some(["docker", "--context", DOCKER_CONTEXT, "system", "prune", "-a", "-f"].map(String::from).to_vec())
         }
@@ -541,6 +542,9 @@ pub fn command(rec: &str) -> Option<Vec<String>> {
 
 /// The context Docker Desktop registers for its own engine.
 pub const DOCKER_CONTEXT: &str = "desktop-linux";
+
+/// The filesystem scan has no object inventory with which to bound a global Docker prune.
+pub const DOCKER_CLEANUP_HOLD: &str = "review in Docker Desktop";
 
 /// How long a cleanup command may run before it's stopped.
 pub fn command_timeout(rec: &str) -> std::time::Duration {
