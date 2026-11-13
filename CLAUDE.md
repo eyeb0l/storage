@@ -12,6 +12,7 @@ The Rust toolchain lives in `~/.cargo/bin`; add it to `PATH` if `cargo` isn't fo
 - `cargo run --release -p storage-core --example scan [-- --json]`: read-only scan from the terminal (about 6 s for a million files)
 - `cargo test -p storage-core`: unit tests plus end-to-end tests against a fake home folder in a temp dir (they create real git repos and worktrees, use `Scanner::home_only()` so nothing outside the fake home is read, and `clean::clean_with` with a Trash inside the fake home so the real one is never touched)
 - `cargo clippy --workspace --all-targets` and `cargo fmt --all` (120 columns, see `rustfmt.toml`)
+- CI (`.github/workflows/ci.yml`, macOS runner) runs `cargo fmt --all --check`, clippy with warnings denied, the `storage-core` tests and `node --check ui/app.js`; `main` requires it to pass
 - `npx @tauri-apps/cli@2 build --bundles app`: release `.app` in `target/release/bundle/macos/` (or `cargo install tauri-cli` and `cargo tauri build`)
 
 ## Architecture
