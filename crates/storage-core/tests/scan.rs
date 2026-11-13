@@ -581,6 +581,29 @@ fn cleanup_rechecks_what_the_scan_saw() {
 }
 
 #[test]
+fn editor_state_goes_only_while_its_project_is_still_gone() {
+    let h = TempHome::new("editorstate");
+    let ws = "Library/Application Support/Code/User/workspaceStorage/abc123";
+    let url = format!("file://{}/Developer/gone%20app", h.0.display());
+    h.file(&format!("{ws}/workspace.json"), format!(r#"{{"folder":"{url}"}}"#).as_bytes());
+    h.big(&format!("{ws}/state.vscdb"));
+    let r = scan(&h.0);
+    let e = entry(&r, "editorstate", ws);
+
+    // The project is restored after the scan: the editor would use this state again.
+    fs::create_dir_all(h.0.join("Developer/gone app")).unwrap();
+    let err = clean::clean_with(&h.0, e, &trash_in(&h.0)).unwrap_err();
+    assert!(err.contains("project folder came back"), "{err}");
+    assert!(h.0.join(ws).join("state.vscdb").exists() && !h.0.join(".Trash/abc123").exists());
+    assert!(!scan(&h.0).entries.iter().any(|e| e.rec == "editorstate"), "not offered while the folder exists");
+
+    // Gone again, it goes.
+    fs::remove_dir(h.0.join("Developer/gone app")).unwrap();
+    clean::clean_with(&h.0, e, &trash_in(&h.0)).unwrap();
+    assert!(!h.0.join(ws).exists() && h.0.join(".Trash/abc123/state.vscdb").exists());
+}
+
+#[test]
 fn the_trash_is_emptied_before_anything_is_moved_into_it() {
     let h = fixture();
     let r = scan(&h.0);

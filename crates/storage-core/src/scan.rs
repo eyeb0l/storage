@@ -789,13 +789,7 @@ impl Scanner {
             "appcaches" if rules::APPLE_CACHES.iter().any(|a| name.starts_with(a)) => None,
             "appcaches" => Some(Hit { hold: self.app_hold(name), ..hit.label(name) }),
             "editorstate" => {
-                // `workspace.json` names the folder this state belongs to; only folders that are gone count.
-                let ws: serde_json::Value =
-                    serde_json::from_slice(&fs::read(full.join("workspace.json")).ok()?).ok()?;
-                let folder = percent_decode(ws["folder"].as_str()?.strip_prefix("file://")?);
-                if folder.starts_with("/Volumes/") || Path::new(&folder).exists() {
-                    return None;
-                }
+                let folder = missing_editor_folder(&full)?;
                 let app = prel.strip_prefix("Library/Application Support/")?.split('/').next()?;
                 let shown = match Path::new(&folder).strip_prefix(&self.home) {
                     Ok(r) => format!("~/{}", r.display()),
@@ -1208,6 +1202,16 @@ pub fn default_toolchains(home: &Path) -> HashSet<String> {
     };
     out.extend(held.into_iter().map(|v| format!(".nvm/versions/node/{v}")));
     out
+}
+
+/// The folder an editor's `workspaceStorage/<id>` state belongs to, as its `workspace.json` names
+/// it, if that folder is gone. A folder on another volume may only be unmounted, so it never counts
+/// as gone, and neither does one that can't be read from the record. Cleanup asks again, since the
+/// folder can come back after the scan and the editor would pick its state up again.
+pub fn missing_editor_folder(dir: &Path) -> Option<String> {
+    let ws: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("workspace.json")).ok()?).ok()?;
+    let folder = percent_decode(ws["folder"].as_str()?.strip_prefix("file://")?);
+    (!folder.starts_with("/Volumes/") && !Path::new(&folder).exists()).then_some(folder)
 }
 
 /// Decodes `%20`-style escapes in a `file://` URL's path.
