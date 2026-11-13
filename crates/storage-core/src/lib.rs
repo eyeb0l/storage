@@ -10,4 +10,4 @@ pub mod scan;
 pub mod sys;
 
 pub use rules::{Cat, Tier};
-pub use scan::{Entry, Progress, Report, Scanner};
+pub use scan::{Entry, Progress, Report, Scanner, Trashed};

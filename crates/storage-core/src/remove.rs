@@ -17,6 +17,10 @@ use std::sync::Once;
 /// Levels below the root whose entries are removed in parallel. Deeper folders are small.
 const PARALLEL_DEPTH: u32 = 4;
 const OPEN_DIR: libc::c_int = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+/// A folder opened only to look names up in it, which is all the `*at` calls need. Without Full
+/// Disk Access macOS won't open the Trash for reading, but still lets it be searched, so what is
+/// in it can be removed by name.
+const SEARCH_DIR: libc::c_int = libc::O_SEARCH | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
 struct Dir(libc::c_int);
 
@@ -86,6 +90,15 @@ impl Held {
         let len = buf.iter().position(|b| *b == 0)?;
         Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..len])))
     }
+
+    /// The held object's device and inode.
+    pub fn ident(&self) -> Option<(u64, u64)> {
+        // SAFETY: stat is plain data and the descriptor is open.
+        unsafe {
+            let mut st: libc::stat = std::mem::zeroed();
+            (libc::fstat(self.0.0, &mut st) == 0).then_some((st.st_dev as u64, st.st_ino))
+        }
+    }
 }
 
 /// Opens `path` (a folder or a regular file below `root`) for [`Held`]. `Ok(None)` when it is
@@ -128,13 +141,12 @@ fn cstr(s: &std::ffi::OsStr) -> io::Result<CString> {
 fn descend(root: &Path, rel: &Path) -> io::Result<Dir> {
     let root_c = cstr(root.as_os_str())?;
     // SAFETY: `root_c` is a valid NUL-terminated path.
-    let mut dir =
-        Dir(check(unsafe { libc::open(root_c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) })?);
+    let mut dir = Dir(check(unsafe { libc::open(root_c.as_ptr(), libc::O_SEARCH | libc::O_CLOEXEC) })?);
     for part in rel.components() {
         let std::path::Component::Normal(name) = part else { return Err(invalid()) };
         let name = cstr(name)?;
         // SAFETY: `dir` is open and `name` is NUL-terminated.
-        dir = Dir(check(unsafe { libc::openat(dir.0, name.as_ptr(), OPEN_DIR) })?);
+        dir = Dir(check(unsafe { libc::openat(dir.0, name.as_ptr(), SEARCH_DIR) })?);
     }
     Ok(dir)
 }
@@ -160,7 +172,11 @@ pub fn remove_under(root: &Path, path: &Path, identity: Option<(u64, u64)>) -> i
 /// Removes everything inside the folder `rel` of `root` and keeps the folder. Refuses if `rel` is
 /// (or is reached through) a symlink.
 pub fn empty_under(root: &Path, rel: &Path) -> io::Result<()> {
-    let dir = descend(root, rel)?;
+    let name = cstr(rel.file_name().ok_or_else(invalid)?)?;
+    let parent = descend(root, rel.parent().unwrap_or(Path::new("")))?;
+    // Listed, so opened for reading: the one place that needs it.
+    // SAFETY: `parent` is open and `name` is NUL-terminated.
+    let dir = Dir(check(unsafe { libc::openat(parent.0, name.as_ptr(), OPEN_DIR) })?);
     raise_fd_limit();
     // SAFETY: stat is plain data and `dir` is open.
     let dev = unsafe {
@@ -189,6 +205,32 @@ fn stat_at(dir: &Dir, name: &CStr) -> io::Result<libc::stat> {
     }
 }
 
+/// Unlinks the file `name` only if it is inode `ino`. A file can't be unlinked through a
+/// descriptor, so it is first renamed to a name of its own, then checked there: the name could
+/// have been given to another file since the caller looked. Anything else is put back.
+fn unlink_checked(parent: &Dir, name: &CStr, ino: u64) -> io::Result<()> {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let aside = CString::new(format!(".storage-removing-{}-{n}", std::process::id())).map_err(|_| invalid())?;
+    let rename = |from: &CStr, to: &CStr| {
+        // SAFETY: `parent` is open and both names are NUL-terminated. Never replaces anything.
+        check(unsafe { libc::renameatx_np(parent.0, from.as_ptr(), parent.0, to.as_ptr(), libc::RENAME_EXCL) })
+    };
+    rename(name, &aside)?;
+    let st = stat_at(parent, &aside)?;
+    if st.st_ino != ino {
+        return match rename(&aside, name) {
+            Ok(_) => Err(replaced()),
+            Err(_) => Err(io::Error::other(format!(
+                "was replaced since the scan, and the new file is now called {}",
+                aside.to_string_lossy()
+            ))),
+        };
+    }
+    // SAFETY: `parent` is open and `aside` is NUL-terminated.
+    check(unsafe { libc::unlinkat(parent.0, aside.as_ptr(), 0) }).map(drop)
+}
+
 /// `expect`: the inode this entry must have, for the one the caller was asked to remove.
 fn remove_entry(
     parent: &Dir,
@@ -199,8 +241,11 @@ fn remove_entry(
     expect: Option<u64>,
 ) -> io::Result<()> {
     if !is_dir {
-        // SAFETY: `parent` is open and `name` is NUL-terminated. Unlinking a symlink removes the link.
-        return check(unsafe { libc::unlinkat(parent.0, name.as_ptr(), 0) }).map(drop);
+        return match expect {
+            Some(ino) => unlink_checked(parent, name, ino),
+            // SAFETY: `parent` is open and `name` is NUL-terminated. Unlinking a symlink removes the link.
+            None => check(unsafe { libc::unlinkat(parent.0, name.as_ptr(), 0) }).map(drop),
+        };
     }
     let dir = open_dir(parent, name)?;
     // SAFETY: stat is plain data and `dir` is open.
@@ -403,6 +448,15 @@ mod tests {
         let err = remove_entry(&parent, c"target", true, st.st_dev, 0, wrong).unwrap_err();
         assert!(err.to_string().contains("replaced"), "{err}");
         assert!(root.join("proj/target/new").exists(), "nothing inside was touched");
+        // So must a file, which can only be unlinked by name.
+        fs::write(root.join("proj/Cargo.toml"), b"x").unwrap();
+        let st = stat_at(&parent, c"Cargo.toml").unwrap();
+        let err = remove_entry(&parent, c"Cargo.toml", false, st.st_dev, 0, Some(st.st_ino + 1)).unwrap_err();
+        assert!(err.to_string().contains("replaced"), "{err}");
+        assert!(root.join("proj/Cargo.toml").exists(), "the file is back under its own name");
+        assert_eq!(fs::read_dir(root.join("proj")).unwrap().count(), 2, "and nothing was left aside");
+        remove_entry(&parent, c"Cargo.toml", false, st.st_dev, 0, Some(st.st_ino)).unwrap();
+        assert!(!root.join("proj/Cargo.toml").exists());
 
         // Unchanged: removed.
         assert!(remove_under(&root, &root.join("proj-moved/target"), seen).is_ok());
