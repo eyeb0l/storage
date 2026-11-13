@@ -85,8 +85,9 @@ cargo run -p storage-app                      # run a debug build
 npx @tauri-apps/cli@2 build --bundles app     # or build Storage.app into target/release/bundle/macos/
 ```
 
-On first launch Storage explains how to grant it Full Disk Access. Without that, macOS hides the Trash and
-other apps' data, so those are reported as unreadable rather than measured. Empty Trash then deletes only
+On first launch Storage explains how to grant it Full Disk Access: it opens the right pane of System Settings
+with a small panel beside it, and dragging Storage from the panel into the list adds it. Without that, macOS
+hides the Trash and other apps' data, so those are reported as unreadable rather than measured. Empty Trash then deletes only
 what Storage itself moved there; empty the rest from Finder. macOS ties the permission to the app's
 signature, so a locally built, ad-hoc signed copy loses it each time it is rebuilt and has to be granted again.
 
