@@ -164,7 +164,8 @@ fn newest_mtime(path: &Path, budget: &mut u32) -> Result<i64, Unseen> {
 
 /// The scan's reasons for offering `e` are checked again, because the report can be hours old:
 /// the same thing is still at the path, nothing has been written to a folder offered for being
-/// stale, and an old CLI version hasn't become the current one.
+/// stale, an old CLI version hasn't become the current one, and editor state's project folder
+/// is still gone.
 fn recheck(home: &Path, e: &Entry) -> Result<(), String> {
     recheck_with(home, e, &sys::running_apps)
 }
@@ -203,6 +204,11 @@ fn recheck_with(home: &Path, e: &Entry, running: &dyn Fn() -> std::collections::
         if current.into_iter().any(|c| target.as_deref().is_some_and(|t| c.starts_with(t))) {
             return changed("became the version in use");
         }
+    }
+    // Editor state is offered because its project folder is gone; one restored or recreated since
+    // the scan would have the editor pick that state up again.
+    if e.rec == "editorstate" && crate::scan::missing_editor_folder(&e.abs).is_none() {
+        return changed("its project folder came back, or its record can't be read,");
     }
     // Things that were free to go when scanned and aren't any more: a version that has become the
     // default, a cache whose app has been started.
