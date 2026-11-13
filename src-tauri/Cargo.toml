@@ -18,3 +18,8 @@ storage-core = { path = "../crates/storage-core" }
 tauri = { version = "2", features = [] }
 serde.workspace = true
 serde_json.workspace = true
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSArray", "NSDictionary", "NSGeometry", "NSObject", "NSString", "NSTimer", "NSURL", "NSValue", "NSDate"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSAccessibilityProtocols", "NSBezierPath", "NSButton", "NSColor", "NSControl", "NSCursor", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSEvent", "NSFont", "NSGraphics", "NSImage", "NSImageView", "NSPanel", "NSPasteboard", "NSResponder", "NSRunningApplication", "NSScreen", "NSText", "NSTextField", "NSView", "NSVisualEffectView", "NSWindow", "NSWorkspace"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGWindow"] }

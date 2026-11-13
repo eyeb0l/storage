@@ -13,8 +13,10 @@ use std::time::Duration;
 use storage_core::clean::{self, Method};
 use storage_core::sys::{self, Disk};
 use storage_core::{Cat, Entry, Progress, Report, Scanner, rules};
-use tauri::State;
 use tauri::ipc::Channel;
+use tauri::{AppHandle, State};
+
+mod access;
 
 #[derive(Default)]
 struct AppState {
@@ -291,13 +293,11 @@ fn show_in_finder(path: PathBuf) -> Result<(), String> {
     Command::new("open").arg("-R").arg(target).spawn().map(drop).map_err(|e| e.to_string())
 }
 
+/// Opens Full Disk Access in System Settings, with a panel beside it to drag Storage into the list.
+/// The main window hears `full-disk-access` once it's granted.
 #[tauri::command]
-fn open_privacy_settings() -> Result<(), String> {
-    Command::new("open")
-        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
-        .spawn()
-        .map(drop)
-        .map_err(|e| e.to_string())
+fn grant_access(app: AppHandle) -> Result<(), String> {
+    access::open(&app)
 }
 
 /// Debug builds only: what a UI script (see `STORAGE_UI_SCRIPT`) found, written to the file named
@@ -337,7 +337,7 @@ fn main() {
             reveal_path,
             reveal_log,
             dev_report,
-            open_privacy_settings
+            grant_access
         ])
         .run(tauri::generate_context!())
         .expect("error while running Storage");

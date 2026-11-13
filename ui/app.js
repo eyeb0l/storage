@@ -673,8 +673,8 @@ function renderNotice() {
   if (el.hidden) return;
   const total = Math.max(un.length, S.report.unreadable_total || 0);
   const many = total.toLocaleString();
-  el.innerHTML = `<span class="text"><b>${many} ${total === 1 ? "folder" : "folders"} couldn't be read</b>, so ${un.length === 1 ? "it counts" : "they count"} as empty and the totals are low. Give Storage Full Disk Access, then scan again.</span>
-    <button type="button" class="btn small" data-act="privacy">Open Privacy &amp; Security</button>
+  el.innerHTML = `<span class="text"><b>${many} ${total === 1 ? "folder" : "folders"} couldn't be read</b>, so ${un.length === 1 ? "it counts" : "they count"} as empty and the totals are low. Give Storage Full Disk Access to count them.</span>
+    <button type="button" class="btn small" data-act="privacy">Grant Full Disk Access</button>
     <button type="button" class="x" data-act="hideaccess" aria-label="Hide this note" title="Hide">×</button>`;
 }
 
@@ -1647,7 +1647,8 @@ function wire() {
       return;
     }
     if (ev.target.closest('[data-act="privacy"]')) {
-      invoke("open_privacy_settings").catch(() => {});
+      // Opens the pane in System Settings with a panel beside it to drag Storage into the list.
+      invoke("grant_access").catch(() => {});
       return;
     }
     const access = ev.target.closest('[data-act="hideaccess"], [data-act="showaccess"]');
@@ -1720,6 +1721,11 @@ async function start() {
   renderLegend();
   bar = new DotBar($("#hero"), $("#barSlot"), $("#fx"));
   wire();
+  // Full Disk Access was just granted from the helper panel: scan again so the totals include
+  // what macOS was hiding. Not in the middle of something, or with the confirm dialog open.
+  TAURI.event.listen("full-disk-access", () => {
+    if (!isBusy() && !$("#confirm").open) scan();
+  }).catch(() => {});
   wireExplorer();
   const ask = (cmd, fallback) => invoke(cmd).catch(() => fallback);
   S.recs = new Map(((await ask("recs", [])) || []).map((x) => [x.id, x]));

@@ -992,14 +992,12 @@ impl Scanner {
                 let size = (left > Duration::from_secs(1))
                     .then(|| {
                         let mut cmd = Command::new("du");
-                        cmd.arg("-sk").arg(path.join(child));
+                        // Error messages in English, for `du_size`.
+                        cmd.arg("-sk").arg(path.join(child)).env("LC_ALL", "C");
                         sys::run(cmd, Some(CLOUD_TIMEOUT.min(left)))
                     })
                     .flatten()
-                    // A partial answer (some folders unreadable) would look like a complete one.
-                    .filter(|o| o.ok)
-                    .and_then(|o| o.stdout.split_whitespace().next()?.parse::<u64>().ok())
-                    .map(|kb| kb * 1024);
+                    .and_then(|o| du_size(&o));
                 match size {
                     Some(s) => {
                         self.count(cat, s);
@@ -1285,6 +1283,19 @@ fn is_uuid(s: &str) -> bool {
         && groups.iter().all(|g| g.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
+/// Bytes on disk from `du -sk`. A failure means part of the folder couldn't be measured and the
+/// total would be low, with one exception: items iCloud keeps only in the cloud ("dataless", with
+/// Optimise Mac Storage) refuse to be looked into without a download and fail with "Resource
+/// deadlock avoided". They take no space here, so a total missing only those is the right one.
+fn du_size(o: &sys::Output) -> Option<u64> {
+    let mut errors = o.stderr.lines().filter(|l| !l.trim().is_empty()).peekable();
+    let only_dataless = errors.peek().is_some() && errors.all(|l| l.trim_end().ends_with("Resource deadlock avoided"));
+    if !o.ok && !only_dataless {
+        return None;
+    }
+    o.stdout.split_whitespace().next()?.parse::<u64>().ok().map(|kb| kb * 1024)
+}
+
 /// Unix seconds for an ISO 8601 UTC timestamp like `2026-11-12T21:11:36Z`.
 fn parse_iso_date(s: &str) -> Option<i64> {
     let (date, time) = s.trim_end_matches('Z').split_once('T')?;
@@ -1304,6 +1315,18 @@ fn parse_iso_date(s: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn du_totals_skip_only_what_icloud_keeps_in_the_cloud() {
+        let out =
+            |ok: bool, stdout: &str, stderr: &str| sys::Output { ok, stdout: stdout.into(), stderr: stderr.into() };
+        assert_eq!(du_size(&out(true, "12\tx\n", "")), Some(12 * 1024));
+        let dataless = "du: x/Documents: Resource deadlock avoided\ndu: x/a b.pxd: Resource deadlock avoided\n";
+        assert_eq!(du_size(&out(false, "5532\tx\n", dataless)), Some(5532 * 1024), "evicted items take no space");
+        let denied = "du: x/Documents: Resource deadlock avoided\ndu: x/private: Permission denied\n";
+        assert_eq!(du_size(&out(false, "8\tx\n", denied)), None, "anything else unread makes the total low");
+        assert_eq!(du_size(&out(false, "8\tx\n", "")), None, "a failure that doesn't say why");
+    }
 
     #[test]
     fn caches_are_matched_to_running_apps() {
