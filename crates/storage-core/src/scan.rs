@@ -9,6 +9,7 @@
 //! Paths are home-relative for the home folder (`Developer/app`) and absolute outside it
 //! (`/Applications/Xcode.app`). The walk also builds a pruned folder [`Node`] tree for the drill-down view.
 
+use crate::bulk::{self, Item, Kind};
 use crate::git::{self, Worktree};
 use crate::rules::{self, Cat};
 use crate::sys::{self, Disk};
@@ -20,7 +21,7 @@ use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -38,8 +39,16 @@ const MAX_UNREADABLE: usize = 200;
 const CLOUD_TIMEOUT: Duration = Duration::from_secs(15);
 const CLOUD_BUDGET: Duration = Duration::from_secs(60);
 const DAY: i64 = 86_400;
+/// How long something in Downloads has to sit untouched before it's offered, and how big it has to be.
+const OLD_DOWNLOAD: i64 = 90 * DAY;
+const DOWNLOAD_MIN: u64 = 5_000_000;
+/// Folders in Application Support and Caches that aren't named after their app.
+const APP_ALIASES: &[(&str, &str)] =
+    &[("code", "com.microsoft.vscode"), ("google", "com.google.chrome"), ("bravesoftware", "com.brave.browser")];
+/// The walk waits on the kernel far more than it computes, so more threads than cores still helps.
+const THREADS: usize = 16;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct Entry {
     pub key: String,
     pub rec: &'static str,
@@ -57,6 +66,13 @@ pub struct Entry {
     /// Removed by running this instead of deleting the path.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cmd: Option<Vec<String>>,
+    /// Why this shouldn't be cleared without a second look ("app is running", "default version").
+    /// Never suggested or swept up by a group selection; the user can still pick it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hold: Option<String>,
+    /// A folder inside that is kept when the entry is cleared, and isn't counted in `size`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spare: Option<String>,
     /// Key of the worktree this lives in.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
@@ -66,6 +82,15 @@ pub struct Entry {
     pub abs: PathBuf,
     #[serde(skip)]
     pub gitdir: Option<PathBuf>,
+    /// Device and inode when scanned. Cleanup refuses anything else that has since taken the path.
+    #[serde(skip)]
+    pub ident: Option<(u64, u64)>,
+    /// When it was scanned, unix seconds.
+    #[serde(skip)]
+    pub scanned: i64,
+    /// Offered only because nothing inside had changed for this long; checked again before clearing.
+    #[serde(skip)]
+    pub min_age: i64,
 }
 
 /// A folder or file in the drill-down tree. Keys are short because the tree is sent to the UI whole.
@@ -117,7 +142,14 @@ pub struct Report {
     pub cats: BTreeMap<Cat, u64>,
     pub recs: &'static [rules::Rec],
     pub entries: Vec<Entry>,
+    /// The first folders that couldn't be read (at most `MAX_UNREADABLE`).
     pub unreadable: Vec<String>,
+    /// How many couldn't be read in all.
+    pub unreadable_total: u64,
+    /// Whether macOS let the scan into protected folders (Full Disk Access).
+    pub full_access: bool,
+    /// Whether the Trash could be read, and so can be emptied from here.
+    pub trash_readable: bool,
     pub tree: Node,
 }
 
@@ -139,6 +171,11 @@ struct Hit {
     gitdir: Option<PathBuf>,
     /// Only an entry if nothing inside changed for this many seconds; the idle time comes from the contents.
     min_age: i64,
+    /// Only an entry at this size or more (never less than `MIN_ENTRY`).
+    min_size: u64,
+    hold: Option<String>,
+    /// A child folder that is kept and not counted.
+    spare: Option<&'static str>,
 }
 
 impl Hit {
@@ -170,13 +207,20 @@ struct Ctx {
     quiet: bool,
 }
 
-type Item = (String, PathBuf, fs::Metadata);
-
 struct Root {
     path: PathBuf,
     rel: String,
     cat: Cat,
     label: String,
+}
+
+/// What was running when the scan started.
+#[derive(Default)]
+struct Live {
+    /// Bundle identifiers and names of running apps, lowercased.
+    running: HashSet<String>,
+    /// Working directories of running processes, if the system could be asked.
+    cwds: Option<Vec<PathBuf>>,
 }
 
 pub struct Scanner {
@@ -195,8 +239,16 @@ pub struct Scanner {
     xcode: Option<PathBuf>,
     user_temp: Option<String>,
     user_cache: Option<String>,
+    /// What's running: asked on its own thread while the walk starts, since `lsof` takes a moment.
+    probe: Mutex<Option<std::thread::JoinHandle<Live>>>,
+    live: std::sync::OnceLock<Live>,
+    /// Home-relative folders of the language versions set as default (rustup, nvm, pyenv).
+    defaults: HashSet<String>,
+    unreadable_total: AtomicU64,
+    trash_unreadable: AtomicBool,
     /// Scan only the home folder (tests).
     home_only: bool,
+    cancelled: AtomicBool,
 }
 
 impl Scanner {
@@ -205,7 +257,9 @@ impl Scanner {
         let dev = fs::metadata(&home)?.dev();
         let claude_current = fs::canonicalize(home.join(".local/bin/claude")).ok();
         let dir = |name| sys::darwin_dir(name).map(|p| p.display().to_string());
+        let defaults = default_toolchains(&home);
         Ok(Scanner {
+            defaults,
             home,
             dev,
             uid: sys::uid(),
@@ -221,7 +275,15 @@ impl Scanner {
             xcode: sys::xcode_app(),
             user_temp: dir("DARWIN_USER_TEMP_DIR"),
             user_cache: dir("DARWIN_USER_CACHE_DIR"),
+            probe: Mutex::new(Some(std::thread::spawn(|| Live {
+                running: sys::running_apps(),
+                cwds: sys::process_cwds(),
+            }))),
+            live: std::sync::OnceLock::new(),
+            unreadable_total: AtomicU64::new(0),
+            trash_unreadable: AtomicBool::new(false),
             home_only: false,
+            cancelled: AtomicBool::new(false),
         })
     }
 
@@ -229,6 +291,22 @@ impl Scanner {
     pub fn home_only(mut self) -> Self {
         self.home_only = true;
         self
+    }
+
+    /// Stops a running scan early. `run` still returns, with whatever it had counted; check
+    /// `cancelled` and throw that report away.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Relaxed);
+    }
+
+    pub fn cancelled(&self) -> bool {
+        self.cancelled.load(Relaxed)
+    }
+
+    /// Entries found so far, from index `from` on. Each is complete when it appears, so a UI can
+    /// list them while the scan is still running.
+    pub fn entries_from(&self, from: usize) -> Vec<Entry> {
+        self.entries.lock().map(|e| e.get(from..).unwrap_or_default().to_vec()).unwrap_or_default()
     }
 
     /// A snapshot that's safe to take from another thread while `run` is going.
@@ -273,7 +351,7 @@ impl Scanner {
     pub fn run(&self) -> Report {
         let started = Instant::now();
         let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(16)
+            .num_threads(THREADS)
             .stack_size(16 << 20)
             .thread_name(|i| format!("scan-{i}"))
             .build()
@@ -281,50 +359,19 @@ impl Scanner {
         let job = || {
             self.ollama();
             let roots = self.roots();
-            let mut nodes: Vec<Node> = roots
-                .par_iter()
-                .map(|r| {
-                    let home = r.rel.is_empty();
-                    let ctx = Ctx {
-                        cat: (!home).then_some(r.cat),
-                        claimed: false,
-                        in_bundle: false,
-                        pat_ok: false,
-                        wt: None,
-                        // The home folder's children get special treatment at depth 0.
-                        depth: if home { 0 } else { 1 },
-                        tree_depth: 0,
-                        activity: 0,
-                        quiet: !home,
-                    };
-                    let mut node = self.walk(&r.path, &r.rel, ctx, None);
-                    node.name.clone_from(&r.label);
-                    if home {
-                        // Home holds every category; colour it neutrally rather than by whatever dominates.
-                        node.cat = Cat::Other;
-                    }
-                    node.path = Some(r.rel.clone());
-                    node
-                })
-                .collect();
-            if !self.home_only {
-                nodes.extend(self.sim_runtimes());
-            }
-            let mut entries = std::mem::take(&mut *self.entries.lock().unwrap());
-            if let Ok(mut c) = self.current.lock() {
-                "Checking worktrees".clone_into(&mut c);
-            }
-            entries.par_iter_mut().filter(|e| e.rec == "worktrees").for_each(|e| {
-                if let Some(gitdir) = &e.gitdir {
-                    e.worktree = Some(git::inspect(&e.abs, &e.path, gitdir, &self.home));
-                }
-            });
-            (nodes, entries)
+            // simctl takes a moment to answer, so ask while the walk runs.
+            let (mut nodes, runtimes): (Vec<Node>, Option<Node>) = rayon::join(
+                || roots.par_iter().map(|r| self.walk_root(r)).collect(),
+                || if self.home_only { None } else { self.sim_runtimes() },
+            );
+            nodes.extend(runtimes);
+            nodes
         };
-        let (mut nodes, mut entries) = match &pool {
+        let mut nodes = match &pool {
             Some(pool) => pool.install(job),
             None => job(),
         };
+        let mut entries = self.entries.lock().unwrap().clone();
         entries.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.key.cmp(&b.key)));
         nodes.retain(|n| n.size > 0 || n.path.as_deref() == Some(""));
 
@@ -360,8 +407,35 @@ impl Scanner {
             recs: rules::RECS,
             entries,
             unreadable: std::mem::take(&mut *self.unreadable.lock().unwrap()),
+            unreadable_total: self.unreadable_total.load(Relaxed),
+            full_access: self.home_only || sys::full_disk_access(),
+            trash_readable: !self.trash_unreadable.load(Relaxed),
             tree,
         }
+    }
+
+    fn walk_root(&self, r: &Root) -> Node {
+        let home = r.rel.is_empty();
+        let ctx = Ctx {
+            cat: (!home).then_some(r.cat),
+            claimed: false,
+            in_bundle: false,
+            pat_ok: false,
+            wt: None,
+            // The home folder's children get special treatment at depth 0.
+            depth: if home { 0 } else { 1 },
+            tree_depth: 0,
+            activity: 0,
+            quiet: !home,
+        };
+        let mut node = self.walk(&r.path, &r.rel, ctx, None, None);
+        node.name.clone_from(&r.label);
+        if home {
+            // Home holds every category; colour it neutrally rather than by whatever dominates.
+            node.cat = Cat::Other;
+        }
+        node.path = Some(r.rel.clone());
+        node
     }
 
     fn push(&self, e: Entry) {
@@ -369,6 +443,10 @@ impl Scanner {
     }
 
     fn note_unreadable(&self, rel: String) {
+        self.unreadable_total.fetch_add(1, Relaxed);
+        if rel == ".Trash" {
+            self.trash_unreadable.store(true, Relaxed);
+        }
         let mut u = self.unreadable.lock().unwrap();
         if u.len() < MAX_UNREADABLE {
             u.push(rel);
@@ -384,26 +462,40 @@ impl Scanner {
         (activity > 0).then(|| ((self.now - activity).max(0) / DAY) as u32)
     }
 
+    /// Whether a cache folder named `name` (an app's name or bundle identifier) belongs to a running app.
+    fn live(&self) -> &Live {
+        self.live.get_or_init(|| {
+            let handle = self.probe.lock().ok().and_then(|mut p| p.take());
+            handle.and_then(|h| h.join().ok()).unwrap_or_default()
+        })
+    }
+
+    fn is_running(&self, name: &str) -> bool {
+        app_is_running(&self.live().running, name)
+    }
+
+    fn app_hold(&self, name: &str) -> Option<String> {
+        self.is_running(name).then(|| "app is running".to_owned())
+    }
+
     fn owned(&self, path: &Path) -> bool {
         fs::symlink_metadata(path).is_ok_and(|m| m.uid() == self.uid)
     }
 
     // ---- walking -----------------------------------------------------------------------
 
-    fn walk(&self, path: &Path, rel: &str, mut ctx: Ctx, mut hit: Option<Hit>) -> Node {
+    /// `ident` is the folder's device and inode as its parent listed it.
+    fn walk(&self, path: &Path, rel: &str, mut ctx: Ctx, mut hit: Option<Hit>, ident: Option<(u64, u64)>) -> Node {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if self.cancelled() {
+            return Node { name, ..Default::default() };
+        }
         if rules::CLOUD_ROOTS.contains(&rel) {
             return self.cloud(path, rel, name, ctx.cat.unwrap_or(Cat::Other));
         }
-        let items: Vec<Item> = match fs::read_dir(path) {
-            Ok(rd) => rd
-                .filter_map(|e| {
-                    let e = e.ok()?;
-                    // DirEntry::metadata doesn't follow symlinks.
-                    let md = e.metadata().ok()?;
-                    Some((e.file_name().to_string_lossy().into_owned(), e.path(), md))
-                })
-                .collect(),
+        // Scan roots may be symlinks (/tmp); below them only real folders are entered.
+        let items: Vec<Item> = match bulk::list(path, ctx.tree_depth == 0) {
+            Ok(items) => items,
             Err(_) => {
                 if !ctx.quiet {
                     self.note_unreadable(rel.to_owned());
@@ -416,7 +508,7 @@ impl Scanner {
         {
             rel.clone_into(&mut c);
         }
-        let names: HashSet<&str> = items.iter().map(|(n, ..)| n.as_str()).collect();
+        let names: HashSet<&str> = items.iter().map(|i| i.name.as_str()).collect();
         let is_project = rules::PROJECT_MARKERS.iter().any(|m| names.contains(m));
 
         // A linked git worktree: everything inside counts as the worktree, and its build output and
@@ -426,7 +518,8 @@ impl Scanner {
             && !ctx.claimed
             && ctx.wt.is_none()
             && ctx.depth > 0
-            && let Some(gitdir) = items.iter().find(|(n, ..)| n == ".git").and_then(|(_, p, _)| git::linked_gitdir(p))
+            && items.iter().any(|i| i.name == ".git" && i.kind == Kind::File)
+            && let Some(gitdir) = git::linked_gitdir(&path.join(".git"))
         {
             hit = Some(Hit { gitdir: Some(gitdir), ..Hit::new("worktrees") });
             ctx.cat = Some(Cat::Worktrees);
@@ -446,58 +539,72 @@ impl Scanner {
         let claim_kids = ctx.claimed || hit.as_ref().is_some_and(|h| h.rec != "worktrees");
         let activity = if !claim_kids && is_project { self.activity(path, &items, hit.as_ref()) } else { ctx.activity };
 
-        let kids: Vec<Node> = items
-            .par_iter()
-            .map(|(cname, cpath, md)| {
-                let crel = if rel.is_empty() { cname.clone() } else { format!("{rel}/{cname}") };
-                let ft = md.file_type();
-                if ft.is_dir() {
-                    if md.dev() != self.dev {
-                        return Node::default();
-                    }
-                    let bundle = ctx.in_bundle || rules::is_bundle(cname);
-                    let chit = if claim_kids {
-                        None
+        let walk_kids = || -> Vec<Node> {
+            items
+                .par_iter()
+                .map(|item| {
+                    let cname = &item.name;
+                    let crel = if rel.is_empty() { cname.clone() } else { format!("{rel}/{cname}") };
+                    if item.kind == Kind::Dir {
+                        if item.dev != self.dev {
+                            return Node::default();
+                        }
+                        // Nothing inside an app bundle or a repository's own storage is offered.
+                        let bundle = ctx.in_bundle || rules::is_bundle(cname) || rules::is_vcs(cname);
+                        let chit = if claim_kids {
+                            None
+                        } else {
+                            self.match_dir(&crel, rel, cname, &names, ctx.pat_ok && !bundle, activity)
+                        };
+                        let ccat = rules::child_cat(ctx.cat, chit.as_ref().map(|h| h.rec), &crel);
+                        let pat_ok = if ctx.depth > 0 {
+                            ctx.pat_ok
+                        } else {
+                            !(cname.starts_with('.') || cname == "Library" || cname == "Applications")
+                        };
+                        let kid = Ctx {
+                            cat: ccat,
+                            claimed: claim_kids,
+                            in_bundle: bundle,
+                            pat_ok,
+                            wt: ctx.wt.clone(),
+                            depth: ctx.depth + 1,
+                            tree_depth: ctx.tree_depth + 1,
+                            activity,
+                            quiet: ctx.quiet,
+                        };
+                        self.walk(&path.join(cname), &crel, kid, chit, Some((item.dev, item.ino)))
+                    } else if item.kind == Kind::File {
+                        if item.nlink > 1 && !self.seen.lock().unwrap().insert((item.dev, item.ino)) {
+                            return Node::default();
+                        }
+                        let size = item.size;
+                        let cat = ctx.cat.unwrap_or(Cat::Other);
+                        self.files.fetch_add(1, Relaxed);
+                        self.count(cat, size);
+                        if !claim_kids {
+                            self.match_file(path, &crel, rel, item, &ctx, cat);
+                        }
+                        // Only kept nodes need a name.
+                        let name = if size >= MIN_NODE { cname.clone() } else { String::new() };
+                        Node { name, size, cat, file: true, newest: item.mtime, ..Default::default() }
                     } else {
-                        self.match_dir(&crel, rel, cname, &names, ctx.pat_ok && !bundle, activity)
-                    };
-                    let ccat = rules::child_cat(ctx.cat, chit.as_ref().map(|h| h.rec), &crel);
-                    let pat_ok = if ctx.depth > 0 {
-                        ctx.pat_ok
-                    } else {
-                        !(cname.starts_with('.') || cname == "Library" || cname == "Applications")
-                    };
-                    let kid = Ctx {
-                        cat: ccat,
-                        claimed: claim_kids,
-                        in_bundle: bundle,
-                        pat_ok,
-                        wt: ctx.wt.clone(),
-                        depth: ctx.depth + 1,
-                        tree_depth: ctx.tree_depth + 1,
-                        activity,
-                        quiet: ctx.quiet,
-                    };
-                    self.walk(cpath, &crel, kid, chit)
-                } else if ft.is_file() {
-                    if md.nlink() > 1 && !self.seen.lock().unwrap().insert((md.dev(), md.ino())) {
-                        return Node::default();
+                        Node::default()
                     }
-                    let size = md.blocks() * 512;
-                    let cat = ctx.cat.unwrap_or(Cat::Other);
-                    self.files.fetch_add(1, Relaxed);
-                    self.count(cat, size);
-                    if !claim_kids {
-                        self.match_file(cpath, &crel, rel, cname, size, md, &ctx, cat);
-                    }
-                    // Only kept nodes need a name.
-                    let name = if size >= MIN_NODE { cname.clone() } else { String::new() };
-                    Node { name, size, cat, file: true, newest: md.mtime(), ..Default::default() }
-                } else {
-                    Node::default()
-                }
-            })
-            .collect();
+                })
+                .collect()
+        };
+        // git is asked about a worktree while its files are being counted, not after the whole scan.
+        let (kids, inspected) = match hit.as_ref().and_then(|h| h.gitdir.as_deref()) {
+            Some(gitdir) => {
+                let inspect =
+                    || if self.cancelled() { Worktree::default() } else { git::inspect(path, rel, gitdir, &self.home) };
+                let (kids, mut info) = rayon::join(walk_kids, inspect);
+                info.busy = self.live().cwds.as_ref().is_some_and(|c| c.iter().any(|cwd| cwd.starts_with(path)));
+                (kids, Some(info))
+            }
+            None => (walk_kids(), None),
+        };
 
         let total: u64 = kids.iter().map(|k| k.size).sum();
         let newest = kids.iter().map(|k| k.newest).max().unwrap_or(0);
@@ -505,7 +612,11 @@ impl Scanner {
 
         if let Some(h) = hit {
             let fresh = h.min_age > 0 && self.now - newest < h.min_age;
-            if total >= MIN_ENTRY && !fresh {
+            // A spared child stays behind, so it isn't part of what clearing the entry frees.
+            let spared =
+                h.spare.and_then(|s| items.iter().zip(&kids).find(|(i, _)| i.name == s)).map_or(0, |(_, k)| k.size);
+            let total = total - spared;
+            if total >= MIN_ENTRY.max(h.min_size) && !fresh {
                 let idle_days = if h.min_age > 0 { self.idle(newest) } else { h.idle_days };
                 self.push(Entry {
                     key: rules::key(h.rec, rel),
@@ -517,10 +628,16 @@ impl Scanner {
                     idle_days,
                     mtime: h.mtime,
                     cmd: h.cmd,
+                    hold: h.hold,
+                    // Kept whatever it weighed when scanned: it may be created or filled before the cleanup.
+                    spare: h.spare.map(str::to_owned),
                     parent: if own_wt { None } else { ctx.wt.as_deref().map(str::to_owned) },
-                    worktree: None,
+                    worktree: inspected,
                     abs: path.to_path_buf(),
                     gitdir: h.gitdir,
+                    ident,
+                    scanned: self.now,
+                    min_age: h.min_age,
                 });
             }
         }
@@ -533,8 +650,8 @@ impl Scanner {
     fn activity(&self, path: &Path, items: &[Item], hit: Option<&Hit>) -> i64 {
         let newest = items
             .iter()
-            .filter(|(n, ..)| !rules::BYPRODUCTS.contains(&n.as_str()) && !rules::BUILD_DIRS.contains(&n.as_str()))
-            .map(|(_, _, md)| md.mtime())
+            .filter(|i| !rules::BYPRODUCTS.contains(&i.name.as_str()) && !rules::BUILD_DIRS.contains(&i.name.as_str()))
+            .map(|i| i.mtime)
             .max()
             .unwrap_or(0);
         let gitdir = match hit.and_then(|h| h.gitdir.clone()) {
@@ -577,9 +694,11 @@ impl Scanner {
             && !app.contains('/')
             && !rules::APPLE_CACHES.iter().any(|a| app.starts_with(a))
         {
-            return Some(Hit::new("containercaches").label(app));
+            return Some(Hit { hold: self.app_hold(app), ..Hit::new("containercaches").label(app) });
         }
-        if pname == "releases" {
+        // Only where agent CLIs install themselves: a deploy folder laid out the same way
+        // (`releases/` beside a `current` link) holds real builds and uploads.
+        if pname == "releases" && rules::AGENT_PACKAGES.iter().any(|a| pp.starts_with(a)) {
             let current = self.home.join(pp).join("current");
             let is_link = fs::symlink_metadata(&current).is_ok_and(|m| m.file_type().is_symlink());
             if is_link && fs::canonicalize(&current).ok() != fs::canonicalize(self.home.join(crel)).ok() {
@@ -592,18 +711,15 @@ impl Scanner {
             && !rest.starts_with("MobileSync")
         {
             let app = rest.split('/').next().unwrap_or(rest);
-            return Some(Hit::new("electron").label(format!("{app}: {name}")));
+            return Some(Hit { hold: self.app_hold(app), ..Hit::new("electron").label(format!("{app}: {name}")) });
         }
         if pat_ok {
             if name == "node_modules" && siblings.contains("package.json") {
                 return Some(Hit { idle_days: self.idle(activity), ..Hit::new("node_modules").label(prel) });
             }
-            let has = |files: &[&str]| files.iter().any(|f| siblings.contains(f));
             if rules::BUILD_DIRS.contains(&name)
-                || (name == "target" && siblings.contains("Cargo.toml"))
-                || (matches!(name, "build" | ".gradle") && has(rules::GRADLE_FILES))
-                || (name == ".build" && siblings.contains("Package.swift"))
-                || (name == "output" && pname == ".vercel")
+                || rules::build_with(name, siblings.iter().copied())
+                || rules::BUILD_INSIDE.contains(&(pname, name))
             {
                 return Some(Hit { idle_days: self.idle(activity), ..Hit::new("build").label(crel) });
             }
@@ -615,7 +731,11 @@ impl Scanner {
     fn match_outside(&self, crel: &str, prel: &str, name: &str) -> Option<Hit> {
         let claude_tmp = format!("/private/tmp/claude-{}", self.uid);
         if prel == "/Applications" {
-            let is_xcode = name.starts_with("Xcode") && name.ends_with(".app");
+            // Xcode.app, Xcode-beta.app, Xcode_26.1.app, "Xcode 26.app"; not Xcodes.app or other tools.
+            let is_xcode = name
+                .strip_suffix(".app")
+                .and_then(|n| n.strip_prefix("Xcode"))
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(['-', '_', ' ']));
             let selected = self.xcode.as_deref().is_some_and(|x| fs::canonicalize(crel).is_ok_and(|c| c == x));
             return (is_xcode && !selected && self.xcode.is_some() && self.owned(Path::new(crel)))
                 .then(|| Hit::new("oldxcode").label(name));
@@ -650,7 +770,7 @@ impl Scanner {
             return Some(Hit { min_age: DAY, ..Hit::new("tmpfiles").label(format!("Temp · {name}")) });
         }
         if Some(prel) == self.user_cache.as_deref() && !apple {
-            return Some(Hit::new("syscaches").label(name));
+            return Some(Hit { hold: self.app_hold(name), ..Hit::new("syscaches").label(name) });
         }
         None
     }
@@ -660,6 +780,33 @@ impl Scanner {
         let hit = Hit::new(id);
         match id {
             "appcaches" if rules::APPLE_CACHES.iter().any(|a| name.starts_with(a)) => None,
+            "appcaches" => Some(Hit { hold: self.app_hold(name), ..hit.label(name) }),
+            "editorstate" => {
+                // `workspace.json` names the folder this state belongs to; only folders that are gone count.
+                let ws: serde_json::Value =
+                    serde_json::from_slice(&fs::read(full.join("workspace.json")).ok()?).ok()?;
+                let folder = percent_decode(ws["folder"].as_str()?.strip_prefix("file://")?);
+                if folder.starts_with("/Volumes/") || Path::new(&folder).exists() {
+                    return None;
+                }
+                let app = prel.strip_prefix("Library/Application Support/")?.split('/').next()?;
+                let shown = match Path::new(&folder).strip_prefix(&self.home) {
+                    Ok(r) => format!("~/{}", r.display()),
+                    Err(_) => folder,
+                };
+                Some(Hit { mtime: Some(sys::mtime(&full)), ..hit.label(format!("{app} · {shown}")) })
+            }
+            "downloads" => Some(Hit { min_age: OLD_DOWNLOAD, min_size: DOWNLOAD_MIN, ..hit.label(name) }),
+            "iosbackups" => {
+                let info: plist::Dictionary = plist::from_file(full.join("Info.plist")).unwrap_or_default();
+                let text = |key: &str| info.get(key).and_then(|v| v.as_string()).map(str::to_owned);
+                let label = match (text("Device Name"), text("Product Name")) {
+                    (Some(device), Some(model)) => format!("{device} ({model})"),
+                    (Some(device), None) => device,
+                    _ => format!("Backup {}", &name[..name.len().min(8)]),
+                };
+                Some(Hit { mtime: Some(sys::mtime(&full)), ..hit.label(label) })
+            }
             "simulators" => {
                 if !is_uuid(name) {
                     return None;
@@ -675,26 +822,35 @@ impl Scanner {
                     Some(r) => format!("{device} ({r})"),
                     None => device.to_owned(),
                 };
+                let booted = crate::clean::simulator_last_used(&dev);
+                // 3 is booted. It is in use whatever its last-used date says.
+                let booted_now = dev.get("state").and_then(|v| v.as_unsigned_integer()) == Some(3);
                 Some(Hit {
                     cmd: Some(vec!["xcrun".into(), "simctl".into(), "delete".into(), name.into()]),
+                    idle_days: booted.and_then(|t| self.idle(t)),
+                    hold: booted_now.then(|| "booted".to_owned()),
                     ..hit.label(label)
                 })
             }
             "toolchains" => {
                 let lang = rules::TOOLCHAIN_NAMES.iter().find(|(p, _)| *p == prel).map_or("", |(_, l)| l);
-                Some(hit.label(format!("{lang} {name}")))
+                let hold = self.defaults.contains(crel).then(|| "default version".to_owned());
+                Some(Hit { hold, ..hit.label(format!("{lang} {name}")) })
             }
             "android" => Some(hit.label(match name.strip_suffix(".avd") {
                 Some(avd) => format!("Emulator {avd}"),
+                None if prel.ends_with("/ndk") => format!("NDK {name}"),
                 None => format!("System image {name}"),
             })),
             "agentlogs" => {
-                let label = if prel == ".claude/projects" {
+                let claude = prel == ".claude/projects";
+                let label = if claude {
                     format!("Claude Code · {}", self.claude_project(&full, name))
                 } else {
                     format!("Gemini · {}", &name[..name.len().min(12)])
                 };
-                Some(Hit { mtime: Some(sys::mtime(&full)), ..hit.label(label) })
+                // Claude Code keeps what it has learned about a project next to the transcripts.
+                Some(Hit { mtime: Some(sys::mtime(&full)), spare: claude.then_some("memory"), ..hit.label(label) })
             }
             "oldversions" => {
                 let current = self.claude_current.as_deref();
@@ -730,18 +886,8 @@ impl Scanner {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn match_file(
-        &self,
-        abs: &Path,
-        crel: &str,
-        prel: &str,
-        name: &str,
-        size: u64,
-        md: &fs::Metadata,
-        ctx: &Ctx,
-        cat: Cat,
-    ) {
+    fn match_file(&self, dir: &Path, crel: &str, prel: &str, item: &Item, ctx: &Ctx, cat: Cat) {
+        let (name, size) = (item.name.as_str(), item.size);
         let entry =
             |rec: &'static str, label: Option<String>, cmd: Option<Vec<String>>, idle_days: Option<u32>| Entry {
                 key: rules::key(rec, crel),
@@ -751,12 +897,17 @@ impl Scanner {
                 cat,
                 label,
                 idle_days,
-                mtime: Some(md.mtime()),
+                mtime: Some(item.mtime),
                 cmd,
-                parent: None,
-                worktree: None,
-                abs: abs.to_path_buf(),
-                gitdir: None,
+                abs: dir.join(name),
+                ident: Some((item.dev, item.ino)),
+                scanned: self.now,
+                min_age: match rec {
+                    "tmpfiles" => DAY,
+                    "downloads" => OLD_DOWNLOAD,
+                    _ => 0,
+                },
+                ..Default::default()
             };
         if let Some(&id) = rules::FIXED_FILES.get(crel) {
             self.push(entry(id, None, rules::command(id), None));
@@ -775,16 +926,17 @@ impl Scanner {
             if let Some(label) = label
                 && !apple
                 && size >= MIN_ENTRY
-                && self.now - md.mtime() >= DAY
-                && md.uid() == self.uid
+                && self.now - item.mtime >= DAY
+                && item.uid == self.uid
             {
-                self.push(entry("tmpfiles", Some(label), None, self.idle(md.mtime())));
+                self.push(entry("tmpfiles", Some(label), None, self.idle(item.mtime)));
             }
             return;
         }
         // The native Claude Code installer keeps each version as a single binary.
         if let Some(version) = crel.strip_prefix(".local/share/claude/versions/").filter(|v| !v.contains('/')) {
-            let in_use = self.claude_current.as_deref().is_some_and(|c| fs::canonicalize(abs).is_ok_and(|t| t == c));
+            let in_use =
+                self.claude_current.as_deref().is_some_and(|c| fs::canonicalize(dir.join(name)).is_ok_and(|t| t == c));
             if !in_use && size >= MIN_ENTRY {
                 self.push(entry("oldversions", Some(format!("claude: {version}")), None, None));
             }
@@ -799,10 +951,13 @@ impl Scanner {
             "installers"
         } else if size >= LARGE_FILE || (top == "Downloads" && size >= LARGE_DOWNLOAD) {
             "largefiles"
+        } else if prel == "Downloads" && size >= DOWNLOAD_MIN && self.now - item.mtime >= OLD_DOWNLOAD {
+            "downloads"
         } else {
             return;
         };
-        self.push(entry(rec, None, None, None));
+        let idle = (rec == "downloads").then(|| self.idle(item.mtime)).flatten();
+        self.push(entry(rec, None, None, idle));
     }
 
     // ---- special folders ---------------------------------------------------------------
@@ -827,6 +982,8 @@ impl Scanner {
                         sys::run(cmd, Some(CLOUD_TIMEOUT.min(left)))
                     })
                     .flatten()
+                    // A partial answer (some folders unreadable) would look like a complete one.
+                    .filter(|o| o.ok)
                     .and_then(|o| o.stdout.split_whitespace().next()?.parse::<u64>().ok())
                     .map(|kb| kb * 1024);
                 match size {
@@ -877,7 +1034,8 @@ impl Scanner {
             let label = format!("{os} {}", rt["version"].as_str().unwrap_or(""));
             let path = rt["path"].as_str().unwrap_or("/System/Library/AssetsV2").to_owned();
             self.count(Cat::Toolchains, size);
-            if rt["deletable"].as_bool().unwrap_or(true) {
+            // Only offered when simctl says it can be deleted.
+            if rt["deletable"].as_bool() == Some(true) {
                 let last_used = rt["lastUsedAt"].as_str().and_then(parse_iso_date);
                 self.push(Entry {
                     key: rules::key("simruntimes", id),
@@ -889,10 +1047,9 @@ impl Scanner {
                     idle_days: last_used.and_then(|t| self.idle(t)),
                     mtime: None,
                     cmd: Some(["xcrun", "simctl", "runtime", "delete", id].map(String::from).to_vec()),
-                    parent: None,
-                    worktree: None,
                     abs: PathBuf::from(path),
-                    gitdir: None,
+                    scanned: self.now,
+                    ..Default::default()
                 });
             }
             kids.push(Node { name: label, size, cat: Cat::Toolchains, file: true, virt: true, ..Default::default() });
@@ -911,6 +1068,8 @@ impl Scanner {
     fn ollama(&self) {
         let mdir = self.home.join(".ollama/models/manifests");
         let mut stack = vec![mdir.clone()];
+        // (name, [(digest, size)]) per model tag.
+        let mut models: Vec<(String, Vec<(String, u64)>)> = Vec::new();
         while let Some(dir) = stack.pop() {
             let Ok(rd) = fs::read_dir(&dir) else { continue };
             for e in rd.flatten() {
@@ -934,27 +1093,116 @@ impl Scanner {
                     continue;
                 };
                 let layers = m["layers"].as_array().cloned().unwrap_or_default();
-                let size_of = |l: &serde_json::Value| l["size"].as_u64().unwrap_or(0);
-                let Some(big) = layers.iter().max_by_key(|l| size_of(l)) else { continue };
-                let blob = format!(".ollama/models/blobs/{}", big["digest"].as_str().unwrap_or("").replace(':', "-"));
-                self.push(Entry {
-                    key: rules::key("ollama", &name),
-                    rec: "ollama",
-                    path: blob.clone(),
-                    size: layers.iter().map(size_of).sum(),
-                    cat: Cat::Models,
-                    label: Some(name.clone()),
-                    idle_days: None,
-                    mtime: None,
-                    cmd: Some(vec!["ollama".into(), "rm".into(), name]),
-                    parent: None,
-                    worktree: None,
-                    abs: self.home.join(blob),
-                    gitdir: None,
-                });
+                let layers = layers
+                    .iter()
+                    .map(|l| (l["digest"].as_str().unwrap_or("").to_owned(), l["size"].as_u64().unwrap_or(0)));
+                models.push((name, layers.collect()));
+            }
+        }
+        // Tags of the same model share blobs, and `ollama rm` only frees the ones nothing else uses.
+        let mut uses: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+        for (_, layers) in &models {
+            for (digest, _) in layers {
+                *uses.entry(digest).or_default() += 1;
+            }
+        }
+        for (name, layers) in &models {
+            let Some((digest, _)) = layers.iter().max_by_key(|(_, size)| *size) else { continue };
+            let blob = format!(".ollama/models/blobs/{}", digest.replace(':', "-"));
+            let own: u64 = layers.iter().filter(|(d, _)| uses[d.as_str()] == 1).map(|(_, size)| size).sum();
+            self.push(Entry {
+                key: rules::key("ollama", name),
+                rec: "ollama",
+                path: blob.clone(),
+                size: own,
+                cat: Cat::Models,
+                label: Some(name.clone()),
+                cmd: Some(vec!["ollama".into(), "rm".into(), name.clone()]),
+                abs: self.home.join(blob),
+                scanned: self.now,
+                ..Default::default()
+            });
+        }
+    }
+}
+
+/// Whether a cache folder named `name` (an app's name or bundle identifier) belongs to one of the
+/// `running` apps (lowercased names and identifiers, from `sys::running_apps`).
+pub fn app_is_running(running: &HashSet<String>, name: &str) -> bool {
+    let name = name.to_lowercase();
+    let alias = APP_ALIASES.iter().find(|(dir, _)| *dir == name).map(|(_, id)| *id);
+    // Helpers keep caches under the app's identifier plus a suffix (`com.app.id.ShipIt`).
+    running.iter().any(|app| {
+        name == *app || alias == Some(app) || name.strip_prefix(app.as_str()).is_some_and(|r| r.starts_with('.'))
+    })
+}
+
+/// Folders of the language versions set as default, home-relative. Removing one of these breaks
+/// every shell, and with nvm the global CLIs installed under it.
+pub fn default_toolchains(home: &Path) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let read = |rel: &str| fs::read_to_string(home.join(rel)).unwrap_or_default();
+    for line in read(".rustup/settings.toml").lines() {
+        if let Some(v) = line.trim().strip_prefix("default_toolchain").and_then(|r| r.split('"').nth(1)) {
+            out.insert(format!(".rustup/toolchains/{v}"));
+        }
+    }
+    for version in read(".pyenv/version").split_whitespace() {
+        out.insert(format!(".pyenv/versions/{version}"));
+    }
+    // nvm's default is an alias, and aliases can point at aliases: `default` -> `lts/*` -> `lts/jod` -> `v22.12.0`.
+    let installed: Vec<String> = fs::read_dir(home.join(".nvm/versions/node"))
+        .map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+        .unwrap_or_default();
+    let key = |v: &str| v.trim_start_matches('v').split('.').map(|n| n.parse::<u32>().unwrap_or(0)).collect::<Vec<_>>();
+    let mut alias = read(".nvm/alias/default").trim().to_owned();
+    let numeric = |a: &str| a.trim_start_matches('v').starts_with(|c: char| c.is_ascii_digit());
+    for _ in 0..4 {
+        if alias.is_empty() || numeric(&alias) || matches!(alias.as_str(), "node" | "stable" | "system") {
+            break;
+        }
+        alias = read(&format!(".nvm/alias/{alias}")).trim().to_owned();
+    }
+    let held: Vec<&String> = match alias.as_str() {
+        // nvm isn't set up, or the default is whatever the system has.
+        "" | "system" if !home.join(".nvm/alias/default").exists() || alias == "system" => Vec::new(),
+        // `22`, `v22` or `22.3.0`: the newest installed version it matches.
+        a if numeric(a) => {
+            let want = a.trim_start_matches('v');
+            let matching = installed.iter().filter(|v| {
+                let v = v.trim_start_matches('v');
+                v == want || v.starts_with(&format!("{want}."))
+            });
+            matching.max_by_key(|v| key(v)).into_iter().collect()
+        }
+        "node" | "stable" => installed.iter().max_by_key(|v| key(v)).into_iter().collect(),
+        // An alias that leads nowhere this can read: any of them might be the default, so hold them all.
+        _ => installed.iter().collect(),
+    };
+    out.extend(held.into_iter().map(|v| format!(".nvm/versions/node/{v}")));
+    out
+}
+
+/// Decodes `%20`-style escapes in a `file://` URL's path.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex =
+            (bytes[i] == b'%').then(|| s.get(i + 1..i + 3)).flatten().and_then(|h| u8::from_str_radix(h, 16).ok());
+        match hex {
+            Some(byte) => {
+                out.push(byte);
+                i += 3;
+            }
+            None => {
+                out.push(bytes[i]);
+                i += 1;
             }
         }
     }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Keeps the largest children and folds the rest into one "N smaller items" node.
@@ -1012,6 +1260,24 @@ fn parse_iso_date(s: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caches_are_matched_to_running_apps() {
+        let running: HashSet<String> =
+            ["slack", "com.tinyspeck.slackmacgap", "com.google.chrome", "com.microsoft.vscode"]
+                .map(String::from)
+                .into();
+        assert!(app_is_running(&running, "Slack"));
+        assert!(
+            app_is_running(&running, "com.tinyspeck.slackmacgap.ShipIt"),
+            "a helper's cache under the app's identifier"
+        );
+        assert!(
+            app_is_running(&running, "Google") && app_is_running(&running, "Code"),
+            "folders not named after their app"
+        );
+        assert!(!app_is_running(&running, "com.tinyspeck.slackmacgapother") && !app_is_running(&running, "Zed"));
+    }
 
     #[test]
     fn iso_dates() {

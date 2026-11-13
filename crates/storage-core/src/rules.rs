@@ -86,8 +86,8 @@ pub static RECS: &[Rec] = &[
         "build",
         Cat::Build,
         "Build output",
-        ".next, .turbo, target, .build, build",
-        "Build folders inside your projects and worktrees. Recreated the next time you build or run dev.",
+        ".next, .turbo, target, .build, DerivedData, .wrangler/tmp",
+        "Build folders and tool caches inside your projects and worktrees. Recreated the next time you build, test or run dev.",
     ),
     safe(
         "node_modules",
@@ -128,14 +128,14 @@ pub static RECS: &[Rec] = &[
         "yarn",
         Cat::Caches,
         "Yarn cache",
-        "~/Library/Caches/Yarn",
+        "~/Library/Caches/Yarn, ~/.yarn",
         "Yarn's download cache. Re-downloaded on the next install.",
     ),
     safe(
         "pnpm",
         Cat::Caches,
         "pnpm store",
-        "~/Library/pnpm/store",
+        "~/Library/pnpm/store, ~/.pnpm-store",
         "pnpm's shared package store. Projects re-link packages on the next install.",
     ),
     safe("bun", Cat::Caches, "Bun cache", "~/.bun/install/cache", "Bun's package download cache."),
@@ -152,8 +152,8 @@ pub static RECS: &[Rec] = &[
         "cocoapods",
         Cat::Caches,
         "CocoaPods cache",
-        "~/Library/Caches/CocoaPods",
-        "Pod download cache. pod install fetches what it needs.",
+        "~/Library/Caches/CocoaPods, ~/.cocoapods/repos",
+        "Pod downloads and the public spec repos. pod install fetches what it needs.",
     ),
     safe(
         "go",
@@ -176,13 +176,19 @@ pub static RECS: &[Rec] = &[
         "~/.gradle/caches",
         "Dependency and build caches, Gradle distributions and daemon logs.",
     ),
-    safe("maven", Cat::Caches, "Maven repository", "~/.m2/repository", "Downloaded Java dependencies."),
-    safe(
+    review(
+        "maven",
+        Cat::Caches,
+        "Maven & Ivy repositories",
+        "~/.m2/repository, ~/.ivy2/cache",
+        "Downloaded Java dependencies, plus anything you installed locally with mvn install, which can't be downloaded again.",
+    ),
+    review(
         "conda",
         Cat::Caches,
         "Conda package cache",
         "~/miniconda3/pkgs",
-        "Package archives conda keeps after installing. Same as conda clean --all.",
+        "Packages conda keeps after installing. Environments that link to them can break, so conda clean --all is the gentler way.",
     ),
     safe(
         "browsers",
@@ -201,33 +207,39 @@ pub static RECS: &[Rec] = &[
     safe(
         "xcode_misc",
         Cat::Caches,
-        "Xcode previews & simulator caches",
-        "~/Library/Developer/Xcode/UserData/Previews",
-        "SwiftUI preview simulators and simulator caches.",
+        "Xcode previews, test devices & caches",
+        "~/Library/Developer/Xcode/UserData/Previews, XCTestDevices",
+        "SwiftUI preview simulators, the simulator clones Xcode makes for parallel tests, and simulator and documentation caches.",
     ),
-    safe(
+    review(
         "appcaches",
         Cat::Caches,
         "App caches",
         "~/Library/Caches",
-        "Caches apps keep to load faster. Quit the apps first; they rebuild what they need.",
+        "Caches apps keep to load faster. Most rebuild what they need, but a few apps keep things here they can't recreate, so these go to the Trash.",
     ),
-    safe(
+    review(
         "electron",
         Cat::Caches,
         "Editor & chat app caches",
         "~/Library/Application Support/*/Cache",
-        "Web caches inside apps like Cursor, VS Code, Slack and Chrome. Quit those apps first.",
+        "Web caches inside apps like Cursor, VS Code, Slack and Chrome. Quit those apps first. Some keep offline downloads here.",
     ),
-    safe(
+    review(
         "containercaches",
         Cat::Caches,
         "Sandboxed app caches",
         "~/Library/Containers/*/Data/Library/Caches",
         "Caches of App Store apps. Quit the apps first.",
     ),
-    safe("toolcaches", Cat::Caches, "Other tool caches", "~/.cache", "Caches written by command-line tools."),
-    safe("logs", Cat::Caches, "Logs", "~/Library/Logs", "Diagnostic logs from apps."),
+    review(
+        "toolcaches",
+        Cat::Caches,
+        "Other tool caches",
+        "~/.cache",
+        "Caches written by command-line tools Storage doesn't know by name.",
+    ),
+    review("logs", Cat::Caches, "Logs", "~/Library/Logs", "Diagnostic logs from apps. They aren't recreated."),
     // ---- review: you decide; moved to the Trash ----------------------------------------
     review(
         "worktrees",
@@ -241,7 +253,7 @@ pub static RECS: &[Rec] = &[
         Cat::Agents,
         "Agent session history",
         "~/.claude/projects, ~/.codex/sessions",
-        "Transcripts that let you resume or search past agent sessions. Older ones are usually fine to let go.",
+        "Transcripts that let you resume or search past agent sessions. Older ones are usually fine to let go. Claude Code's per-project memory is kept.",
     ),
     review(
         "codextasks",
@@ -274,9 +286,9 @@ pub static RECS: &[Rec] = &[
     review(
         "android",
         Cat::Toolchains,
-        "Android emulators & system images",
-        "~/.android/avd, ~/Library/Android/sdk/system-images",
-        "Emulator disks and the OS images they boot from. Android Studio can download them again.",
+        "Android emulators, system images & NDKs",
+        "~/.android/avd, ~/Library/Android/sdk",
+        "Emulator disks, the OS images they boot from and NDK versions. Android Studio can download them again.",
     ),
     review(
         "xcode_archives",
@@ -292,7 +304,7 @@ pub static RECS: &[Rec] = &[
             Cat::Containers,
             "Docker images & build cache",
             "~/Library/Containers/com.docker.docker",
-            "Docker's disk image. Runs docker system prune -a, which removes stopped containers, unused images and build cache, but keeps volumes. Docker must be running.",
+            "Docker Desktop's disk image. Runs docker system prune -a on Docker Desktop's own engine, which removes stopped containers, unused images and build cache for good, but keeps volumes. Docker must be running.",
         )
     },
     review(
@@ -325,6 +337,27 @@ pub static RECS: &[Rec] = &[
         "Usually not needed once the app is installed.",
     ),
     review(
+        "editorstate",
+        Cat::Agents,
+        "Editor state for deleted projects",
+        "~/Library/Application Support/{Code,Cursor}/User/workspaceStorage",
+        "What VS Code, Cursor and Windsurf remember about a folder (open files, extension data, chat history) whose folder no longer exists.",
+    ),
+    review(
+        "iosbackups",
+        Cat::Other,
+        "iPhone & iPad backups",
+        "~/Library/Application Support/MobileSync/Backup",
+        "Backups of your devices made with Finder. One can only be recreated by backing the device up again, so keep the latest for any device you still use.",
+    ),
+    review(
+        "downloads",
+        Cat::Other,
+        "Old downloads",
+        "~/Downloads, unchanged for three months",
+        "Files and folders in Downloads that nothing has touched for three months or more. Check each one first.",
+    ),
+    review(
         "largefiles",
         Cat::Other,
         "Large files",
@@ -332,14 +365,14 @@ pub static RECS: &[Rec] = &[
         "Big files outside Library. Check each one first.",
     ),
     // ---- outside the home folder ---------------------------------------------------------
-    safe(
+    review(
         "agenttmp",
         Cat::Agents,
         "Agent temp files",
         "/tmp/claude-<uid>",
         "Task output and scratch files from past Claude Code sessions. Anything touched in the last day is left alone.",
     ),
-    safe(
+    review(
         "syscaches",
         Cat::Caches,
         "Per-user system caches",
@@ -397,6 +430,20 @@ pub static FIXED: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(
         (".cache/uv", "uv"),
         ("Library/Caches/Homebrew", "homebrew"),
         ("Library/Caches/CocoaPods", "cocoapods"),
+        // Only the public spec repos: private ones were added by hand and wouldn't come back.
+        (".cocoapods/repos/master", "cocoapods"),
+        (".cocoapods/repos/trunk", "cocoapods"),
+        (".pnpm-store", "pnpm"),
+        (".local/share/pnpm/store", "pnpm"),
+        (".yarn/cache", "yarn"),
+        (".ivy2/cache", "maven"),
+        (".nuget/packages", "toolcaches"),
+        (".pub-cache/hosted", "toolcaches"),
+        (".pub-cache/git", "toolcaches"),
+        (".android/cache", "toolcaches"),
+        (".nvm/.cache", "toolcaches"),
+        ("Library/Developer/Xcode/DocumentationCache", "xcode_misc"),
+        ("Library/Developer/XCTestDevices", "xcode_misc"),
         ("Library/Caches/go-build", "go"),
         ("go/pkg/mod", "go"),
         (".cargo/registry", "cargo"),
@@ -450,6 +497,12 @@ pub static CHILDREN_OF: LazyLock<HashMap<&'static str, &'static str>> = LazyLock
         (".cache/huggingface/hub", "mlmodels"),
         ("Library/Developer/CoreSimulator/Devices", "simulators"),
         ("Library/Android/sdk/system-images", "android"),
+        ("Library/Android/sdk/ndk", "android"),
+        ("Library/Application Support/MobileSync/Backup", "iosbackups"),
+        ("Downloads", "downloads"),
+        ("Library/Application Support/Code/User/workspaceStorage", "editorstate"),
+        ("Library/Application Support/Cursor/User/workspaceStorage", "editorstate"),
+        ("Library/Application Support/Windsurf/User/workspaceStorage", "editorstate"),
         (".android/avd", "android"),
         ("Library/Developer/XcodeBuildMCP/workspaces", "xcode_dd"),
         (".nvm/versions/node", "toolchains"),
@@ -477,9 +530,25 @@ pub static FIXED_FILES: LazyLock<HashMap<&'static str, &'static str>> =
 /// Recommendations removed by their own tool rather than by deleting the path.
 pub fn command(rec: &str) -> Option<Vec<String>> {
     match rec {
-        "docker" => Some(["docker", "system", "prune", "-a", "-f"].map(String::from).to_vec()),
+        // The image measured is Docker Desktop's, so prune that engine and not whatever context
+        // (possibly a remote host) is current.
+        "docker" => {
+            Some(["docker", "--context", DOCKER_CONTEXT, "system", "prune", "-a", "-f"].map(String::from).to_vec())
+        }
         _ => None,
     }
+}
+
+/// The context Docker Desktop registers for its own engine.
+pub const DOCKER_CONTEXT: &str = "desktop-linux";
+
+/// How long a cleanup command may run before it's stopped.
+pub fn command_timeout(rec: &str) -> std::time::Duration {
+    std::time::Duration::from_secs(match rec {
+        "docker" => 900,
+        "simruntimes" | "brewold" => 300,
+        _ => 120,
+    })
 }
 
 pub const TOOLCHAIN_NAMES: &[(&str, &str)] =
@@ -510,6 +579,88 @@ pub const ELECTRON_CACHE: &[&str] = &[
     "ShaderCache",
     "PersistentCache",
 ];
+/// Build folders that are only build folders next to one of these files. A name ending in `*`
+/// matches as a prefix; a marker starting with `*` matches as a suffix.
+pub const BUILD_WITH: &[(&str, &[&str])] = &[
+    ("target", &["Cargo.toml", "pom.xml"]),
+    (
+        "build",
+        &[
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+            "CMakeLists.txt",
+            "pubspec.yaml",
+        ],
+    ),
+    (".gradle", GRADLE_FILES),
+    (".cxx", GRADLE_FILES),
+    (".build", &["Package.swift"]),
+    ("DerivedData", &["Package.swift", "*.xcodeproj", "*.xcworkspace"]),
+    ("cmake-build-*", &["CMakeLists.txt"]),
+    (".output", &["package.json"]),
+    ("storybook-static", &["package.json"]),
+    ("zig-cache", &["build.zig"]),
+    (".zig-cache", &["build.zig"]),
+    ("zig-out", &["build.zig"]),
+    ("_build", &["mix.exs", "dune-project"]),
+    ("coverage", &["package.json"]),
+];
+
+/// Subfolders that are disposable although their parent isn't: `.wrangler` keeps local D1, KV and
+/// R2 data in `state`, and `.terraform` remembers the backend and workspace.
+pub const BUILD_INSIDE: &[(&str, &str)] =
+    &[(".vercel", "output"), (".nx", "cache"), (".wrangler", "tmp"), (".terraform", "providers")];
+
+/// Whether an ignored file or folder called `name` is something tools recreate (so it isn't
+/// counted as work that only exists in a worktree).
+pub fn is_regenerable(name: &str) -> bool {
+    // Not here: `.wrangler` and `.terraform` (they hold local data and state next to their caches),
+    // nor agents' and editors' own folders (`.claude`, `.cursor`, `.vscode`, `.idea`), which can
+    // hold settings and launch configurations written by hand.
+    const OTHER: &[&str] = &[
+        "dist",
+        "out",
+        "coverage",
+        "__pycache__",
+        "Pods",
+        ".cache",
+        "tmp",
+        ".tmp",
+        ".eslintcache",
+        ".vercel",
+        ".nx",
+        ".swiftpm",
+        ".direnv",
+        "logs",
+        "xcuserdata",
+    ];
+    BYPRODUCTS.contains(&name)
+        || BUILD_DIRS.contains(&name)
+        || BUILD_WITH.iter().any(|(dir, _)| dir.strip_suffix('*').map_or(*dir == name, |p| name.starts_with(p)))
+        || OTHER.contains(&name)
+        || [".log", ".tsbuildinfo", ".pyc", ".o", ".xcuserstate", ".lock"].iter().any(|ext| name.ends_with(ext))
+}
+
+/// Whether `name`, in a folder holding `siblings`, is build output by one of the `BUILD_WITH` rules.
+pub fn build_with<'a>(name: &str, siblings: impl Iterator<Item = &'a str> + Clone) -> bool {
+    BUILD_WITH.iter().any(|(dir, markers)| {
+        let named = match dir.strip_suffix('*') {
+            Some(prefix) => name.starts_with(prefix),
+            None => name == *dir,
+        };
+        named
+            && siblings.clone().any(|s| {
+                markers.iter().any(|m| match m.strip_prefix('*') {
+                    Some(suffix) => s.ends_with(suffix),
+                    None => s == *m,
+                })
+            })
+    })
+}
+
+/// Folders that are build output or a tool's cache wherever they appear in a project.
 pub const BUILD_DIRS: &[&str] = &[
     ".next",
     ".turbo",
@@ -519,8 +670,12 @@ pub const BUILD_DIRS: &[&str] = &[
     ".angular",
     ".docusaurus",
     ".expo",
-    ".wrangler",
     ".dart_tool",
+    ".astro",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".pytest_cache",
+    ".tox",
 ];
 pub const GRADLE_FILES: &[&str] = &["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"];
 pub const PROJECT_MARKERS: &[&str] = &[
@@ -538,7 +693,8 @@ pub const PROJECT_MARKERS: &[&str] = &[
     "deno.json",
 ];
 /// Folders that are byproducts, not sources; ignored when judging when a project was last touched.
-pub const BYPRODUCTS: &[&str] = &["node_modules", ".DS_Store", "target", "build", ".build", ".venv", "venv", ".gradle"];
+pub const BYPRODUCTS: &[&str] =
+    &["node_modules", ".DS_Store", "target", "build", ".build", ".venv", "venv", ".gradle", "DerivedData", "_build"];
 pub const INSTALLER_EXT: &[&str] = &["dmg", "pkg", "iso", "xip", "mpkg"];
 pub const BUNDLE_EXT: &[&str] = &[
     "app",
@@ -553,6 +709,11 @@ pub const BUNDLE_EXT: &[&str] = &[
     "bundle",
     "framework",
     "sparsebundle",
+    // Virtual machines: one disk image inside is not a "large file" to throw away on its own.
+    "pvm",
+    "vmwarevm",
+    "utm",
+    "vbox",
     "pages",
     "numbers",
     "key",
@@ -698,6 +859,16 @@ pub fn is_bundle(name: &str) -> bool {
     ext(name).is_some_and(|e| BUNDLE_EXT.contains(&e.as_str()))
 }
 
+/// A version control folder. Nothing inside one is offered: a pack file is not a spare large file.
+pub fn is_vcs(name: &str) -> bool {
+    matches!(name, ".git" | ".hg" | ".svn" | ".jj")
+}
+
+/// Where an agent CLI installs itself with old releases beside a `current` link. Only the layout
+/// that has actually been seen: agents' other folders hold worktrees, and a project in one can
+/// have a deploy folder laid out exactly like this.
+pub const AGENT_PACKAGES: &[&str] = &[".codex/packages/"];
+
 pub fn ext(name: &str) -> Option<String> {
     let (stem, e) = name.rsplit_once('.')?;
     (!stem.is_empty()).then(|| e.to_ascii_lowercase())
@@ -732,6 +903,41 @@ mod tests {
         assert_eq!(child_cat(Some(Cat::Code), Some("node_modules"), "x/node_modules"), Some(Cat::Deps));
         assert_eq!(child_cat(Some(Cat::Caches), None, ".cache/torch"), Some(Cat::Models));
         assert_eq!(child_cat(None, None, "Documents"), None);
+    }
+
+    #[test]
+    fn build_folders_need_their_marker() {
+        let with = |name: &str, siblings: &[&str]| build_with(name, siblings.iter().copied());
+        assert!(with("target", &["Cargo.toml", "src"]));
+        assert!(with("target", &["pom.xml"]));
+        assert!(!with("target", &["package.json"]), "a folder that happens to be called target");
+        assert!(with("DerivedData", &["App.xcodeproj"]));
+        assert!(with("cmake-build-debug", &["CMakeLists.txt"]));
+        assert!(!with("cmake-build-debug", &["Makefile"]));
+        assert!(!with("build", &[]));
+    }
+
+    #[test]
+    fn only_rebuilt_things_are_deleted_outright() {
+        for id in [
+            "maven",
+            "conda",
+            "appcaches",
+            "electron",
+            "containercaches",
+            "toolcaches",
+            "logs",
+            "syscaches",
+            "agenttmp",
+        ] {
+            assert_eq!(rec(id).tier, Tier::Review, "{id} can hold things that don't come back");
+        }
+        assert!(!BUILD_DIRS.contains(&".wrangler") && !BUILD_DIRS.contains(&".terraform"));
+        assert!(is_regenerable("node_modules") && is_regenerable("debug.log") && is_regenerable("cmake-build-debug"));
+        assert!(!is_regenerable(".env") && !is_regenerable("notes.md"));
+        assert!(!is_regenerable(".wrangler") && !is_regenerable(".terraform"), "they hold state, not just caches");
+        assert!(!is_regenerable(".vscode") && !is_regenerable(".idea"), "launch configurations are written by hand");
+        assert!(command("docker").unwrap().windows(2).any(|w| w == ["--context", DOCKER_CONTEXT]));
     }
 
     #[test]

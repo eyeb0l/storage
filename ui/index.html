@@ -14,30 +14,38 @@
     <canvas class="fx" id="fx" aria-hidden="true"></canvas>
     <header class="hero-head">
       <h1 class="used"><b id="usedNum" class="num">0.0 GB</b> <span id="usedOf"></span></h1>
-      <button type="button" class="ghost" id="rescan">
-        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.2 6.2A5.5 5.5 0 0 0 3 4.6M2.8 9.8A5.5 5.5 0 0 0 13 11.4M3 1.8v2.9h2.9M13 14.2v-2.9h-2.9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        Rescan
-      </button>
+      <button type="button" class="ghost" id="rescan"></button>
     </header>
     <p class="status" id="status" role="status" aria-live="polite"></p>
     <div class="bar-slot" id="barSlot" role="img" aria-label="Disk usage by category"></div>
     <div class="legend" id="legend"></div>
-    <footer class="suggest" id="suggest"></footer>
+    <footer class="suggest" id="suggest" aria-live="polite"></footer>
+    <div class="issues" id="issues" hidden></div>
   </section>
+
+  <div class="notice" id="notice" hidden></div>
 
   <nav class="tabs" role="tablist" aria-label="View">
     <button type="button" role="tab" data-tab="clean" aria-selected="true">Clean up</button>
-    <button type="button" role="tab" data-tab="explore" aria-selected="false">Explore</button>
+    <button type="button" role="tab" data-tab="explore" aria-selected="false" tabindex="-1">Explore</button>
   </nav>
 
   <div id="cleanView">
+    <div class="card panel skeleton" id="skeleton" hidden aria-hidden="true">
+      <div class="sk-head"><i style="width:150px"></i><i style="width:320px"></i></div>
+      <div class="sk-row"><i></i><i style="width:38%"></i><i></i></div>
+      <div class="sk-row"><i></i><i style="width:52%"></i><i></i></div>
+      <div class="sk-row"><i></i><i style="width:30%"></i><i></i></div>
+      <div class="sk-row"><i></i><i style="width:44%"></i><i></i></div>
+      <div class="sk-row"><i></i><i style="width:36%"></i><i></i></div>
+    </div>
     <section class="card panel" id="wtPanel" hidden aria-labelledby="wt-h">
       <div class="panel-head">
         <div>
           <h2 id="wt-h">Agent worktrees</h2>
-          <p>Checkouts coding agents made for each task. Moving one to the Trash keeps its branch and commits.</p>
+          <p>Checkouts agents made for each task. Trashing one keeps its branch and commits in the repo.</p>
         </div>
-        <button type="button" class="btn small" id="selectMerged" title="Merged, or its remote branch was deleted, with nothing uncommitted and not used in the last two hours">Select finished</button>
+        <button type="button" class="btn small" id="selectMerged">Select finished</button>
       </div>
       <div id="wtList"></div>
     </section>
@@ -46,11 +54,14 @@
       <div class="panel-head">
         <div>
           <h2 id="rec-h">Everything you can clear</h2>
-          <p>Safe items are deleted and rebuilt by your tools when needed. Review items go to the Trash.</p>
+          <p>Rebuilt things are deleted, your-call things go to the Trash, and tool-owned things are removed for good.</p>
         </div>
+        <label class="search">
+          <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          <input type="search" id="filter" placeholder="Filter" aria-label="Filter by name or path" autocomplete="off" spellcheck="false">
+        </label>
       </div>
       <div id="recList"></div>
-      <div id="unreadable"></div>
     </section>
   </div>
 
@@ -62,7 +73,7 @@
       <button type="button" class="btn small" id="revealView">Show in Finder</button>
     </div>
     <div class="tm-wrap"><div id="tm"></div></div>
-    <p class="note">Click a folder to open it, Escape to go back, ⌥-click to show it in Finder. Tick a tile to add it to your selection.</p>
+    <p class="note"><span id="mapNote"></span> Click a folder to open it, Escape to go back, ⌥-click to show it in Finder. Tick a tile to add it to your selection.</p>
   </section>
 </main>
 
@@ -73,10 +84,13 @@
   <button type="button" class="btn primary" id="reviewBtn">Review &amp; clear</button>
 </div>
 
-<dialog id="confirm" aria-labelledby="confirm-h">
+<dialog id="confirm" aria-labelledby="confirm-h" aria-describedby="confirmWarn">
   <form method="dialog">
-    <h2 id="confirm-h">Clear <span id="confirmSize"></span>?</h2>
-    <div id="confirmBody"></div>
+    <header class="dlg-head">
+      <h2 id="confirm-h">Clear <span id="confirmSize" class="num"></span>?</h2>
+      <div id="confirmWarn"></div>
+    </header>
+    <div id="confirmBody" tabindex="0" aria-label="What will be cleared"></div>
     <div class="dlg-foot">
       <button type="submit" class="btn" value="cancel">Cancel</button>
       <button type="submit" class="btn primary" value="ok" id="confirmOk">Clear</button>
