@@ -954,6 +954,48 @@ fn default_node_and_python_versions_are_held_back() {
 }
 
 #[test]
+fn docker_cleanup_cannot_prune_objects_added_after_the_scan() {
+    let h = TempHome::new("docker");
+    let disk = "Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw";
+    h.big(disk);
+    // This executable only changes a text inventory in the throwaway home. It never invokes Docker.
+    h.file("docker", b"#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\nprintf '' > \"$0.inventory\"\n");
+    fs::set_permissions(h.0.join("docker"), fs::Permissions::from_mode(0o755)).unwrap();
+    h.file("docker.inventory", b"unused-image-at-scan\n");
+    let r = scan(&h.0);
+    let mut docker = entry(&r, "docker", disk).clone();
+    let command = docker.cmd.as_mut().expect("Docker is never removed as a file");
+    assert_eq!(command, &["docker", "--context", "desktop-linux", "system", "prune", "-a", "-f"]);
+    command[0] = h.0.join("docker").to_str().unwrap().into();
+    let inventory = b"unused-image-at-scan\nimage-pulled-after-scan\nstopped-container-created-after-scan\n";
+    h.file("docker.inventory", inventory);
+
+    let outcome = clean::clean(&h.0, &docker);
+    assert_eq!(fs::read(h.0.join("docker.inventory")).unwrap(), inventory, "unseen objects must survive");
+    assert!(!h.0.join("docker.args").exists(), "the global prune must not start");
+    assert!(outcome.unwrap_err().contains("Docker Desktop"));
+    assert!(h.0.join(disk).exists(), "the disk image stays in place");
+}
+
+#[test]
+fn docker_cleanup_is_refused_even_for_a_fresh_scan_or_a_missing_command() {
+    let h = TempHome::new("docker-fresh");
+    let disk = "Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw";
+    h.big(disk);
+    let r = scan(&h.0);
+    let mut docker = entry(&r, "docker", disk).clone();
+    assert!(docker.hold.as_deref().is_some_and(|why| why.contains("Docker Desktop")));
+    docker.hold = None; // The UI's hold is advisory; the backend must enforce the refusal itself.
+    // A fresh filesystem scan still has no Docker object inventory. An absent command must not
+    // turn this into a filesystem removal, and an empty command must not bypass the refusal.
+    for cmd in [Some(vec!["/usr/bin/true".into()]), None, Some(Vec::new())] {
+        docker.cmd = cmd;
+        assert!(clean::clean_with(&h.0, &docker, &trash_in(&h.0)).unwrap_err().contains("Docker Desktop"));
+        assert!(h.0.join(disk).exists());
+    }
+}
+
+#[test]
 fn a_simulator_goes_only_if_shut_down_and_unused_since_the_scan() {
     let h = TempHome::new("sim");
     let plist = |body: &str| {
