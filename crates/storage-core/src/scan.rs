@@ -117,7 +117,7 @@ pub struct Node {
     /// Not a folder on disk (simulator runtimes, the part of the disk that wasn't scanned).
     #[serde(rename = "x", skip_serializing_if = "is_false")]
     pub virt: bool,
-    /// Newest modification time of anything inside.
+    /// Newest modification time of it or anything inside, folders included.
     #[serde(skip)]
     pub newest: i64,
 }
@@ -205,6 +205,9 @@ struct Ctx {
     activity: i64,
     /// Outside the home folder: unreadable folders are expected (root-owned) and not reported.
     quiet: bool,
+    /// When this folder itself last changed (something added, removed or renamed in it), unix
+    /// seconds. 0 at a scan root.
+    mtime: i64,
 }
 
 struct Root {
@@ -427,6 +430,7 @@ impl Scanner {
             tree_depth: 0,
             activity: 0,
             quiet: !home,
+            mtime: 0,
         };
         let mut node = self.walk(&r.path, &r.rel, ctx, None, None);
         node.name.clone_from(&r.label);
@@ -572,6 +576,7 @@ impl Scanner {
                             tree_depth: ctx.tree_depth + 1,
                             activity,
                             quiet: ctx.quiet,
+                            mtime: item.mtime,
                         };
                         self.walk(&path.join(cname), &crel, kid, chit, Some((item.dev, item.ino)))
                     } else if item.kind == Kind::File {
@@ -607,7 +612,9 @@ impl Scanner {
         };
 
         let total: u64 = kids.iter().map(|k| k.size).sum();
-        let newest = kids.iter().map(|k| k.newest).max().unwrap_or(0);
+        // A folder's own time counts too: one unpacked today from an archive of old files was
+        // touched today, and cleanup's "still untouched?" check looks at folders as well.
+        let newest = kids.iter().map(|k| k.newest).max().unwrap_or(0).max(ctx.mtime);
         let cat = ctx.cat.unwrap_or_else(|| dominant(&kids));
 
         if let Some(h) = hit {
@@ -1099,25 +1106,45 @@ impl Scanner {
                 models.push((name, layers.collect()));
             }
         }
+        models.sort();
         // Tags of the same model share blobs, and `ollama rm` only frees the ones nothing else uses.
-        let mut uses: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+        let mut uses: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
         for (_, layers) in &models {
-            for (digest, _) in layers {
+            for digest in layers.iter().map(|(d, _)| d.as_str()).collect::<HashSet<_>>() {
                 *uses.entry(digest).or_default() += 1;
             }
         }
-        for (name, layers) in &models {
-            let Some((digest, _)) = layers.iter().max_by_key(|(_, size)| *size) else { continue };
-            let blob = format!(".ollama/models/blobs/{}", digest.replace(':', "-"));
-            let own: u64 = layers.iter().filter(|(d, _)| uses[d.as_str()] == 1).map(|(_, size)| size).sum();
+        // Tags with the same weights (an alias, or a model built FROM another) free them only when
+        // every one of them goes. Offered apart, each would weigh next to nothing and removing one
+        // would free nothing, so they are one entry, removed together.
+        let mut groups: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+        for (i, (_, layers)) in models.iter().enumerate() {
+            if let Some((weights, _)) = layers.iter().max_by_key(|(_, size)| *size) {
+                groups.entry(weights).or_default().push(i);
+            }
+        }
+        for (weights, tags) in groups {
+            let tags: Vec<_> = tags.into_iter().map(|i| &models[i]).collect();
+            let names: Vec<String> = tags.iter().map(|(name, _)| name.clone()).collect();
+            // What removing all of them frees: the blobs no tag outside the group uses.
+            let mut inside: std::collections::HashMap<&str, (usize, u64)> = std::collections::HashMap::new();
+            for (_, layers) in &tags {
+                for digest in layers.iter().map(|(d, _)| d.as_str()).collect::<HashSet<_>>() {
+                    let size = layers.iter().find(|(d, _)| d == digest).map_or(0, |(_, size)| *size);
+                    inside.entry(digest).or_insert((0, size)).0 += 1;
+                }
+            }
+            let own: u64 = inside.iter().filter(|(d, (n, _))| uses[*d] == *n).map(|(_, (_, size))| size).sum();
+            let blob = format!(".ollama/models/blobs/{}", weights.replace(':', "-"));
+            let label = names.join(", ");
             self.push(Entry {
-                key: rules::key("ollama", name),
+                key: rules::key("ollama", &label),
                 rec: "ollama",
                 path: blob.clone(),
                 size: own,
                 cat: Cat::Models,
-                label: Some(name.clone()),
-                cmd: Some(vec!["ollama".into(), "rm".into(), name.clone()]),
+                label: Some(label),
+                cmd: Some(["ollama", "rm"].into_iter().map(String::from).chain(names).collect()),
                 abs: self.home.join(blob),
                 scanned: self.now,
                 ..Default::default()

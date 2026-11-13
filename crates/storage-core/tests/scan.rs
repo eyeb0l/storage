@@ -43,10 +43,11 @@ impl TempHome {
 }
 
 impl TempHome {
-    /// Backdates a file, as if it had been sitting there for `days`.
+    /// Backdates a file or a folder, as if it had been sitting there for `days`. A folder's own
+    /// time moves whenever something is added to or removed from it, so it is aged after its contents.
     fn age(&self, rel: &str, days: u64) {
         let then = std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400);
-        fs::File::options().write(true).open(self.0.join(rel)).unwrap().set_modified(then).unwrap();
+        fs::File::open(self.0.join(rel)).unwrap().set_modified(then).unwrap();
     }
 }
 
@@ -217,9 +218,17 @@ fn old_downloads_are_offered_and_new_ones_are_not() {
     h.age("Downloads/old-small.txt", 120);
     h.file("Downloads/old-folder/data.bin", &vec![1; 6_000_000]);
     h.age("Downloads/old-folder/data.bin", 200);
+    h.age("Downloads/old-folder", 200);
     h.file("Downloads/busy-folder/old.bin", &vec![1; 6_000_000]);
     h.age("Downloads/busy-folder/old.bin", 200);
     h.file("Downloads/busy-folder/today.txt", b"still in use");
+    h.age("Downloads/busy-folder", 200);
+    // Unpacked today from an archive that kept its files' old dates: the folders are new.
+    h.file("Downloads/unpacked/sub/old.bin", &vec![1; 6_000_000]);
+    h.age("Downloads/unpacked/sub/old.bin", 200);
+    h.file("Downloads/unpacked-flat/old.bin", &vec![1; 6_000_000]);
+    h.age("Downloads/unpacked-flat/old.bin", 200);
+    h.age("Downloads/unpacked/sub", 200);
     let r = scan(&h.0);
     let old = entry(&r, "downloads", "Downloads/old.zip");
     assert!(old.idle_days.is_some_and(|d| (119..=121).contains(&d)), "{old:?}");
@@ -236,6 +245,38 @@ fn old_downloads_are_offered_and_new_ones_are_not() {
     assert!(!h.0.join("Downloads/old-folder").exists() && h.0.join(".Trash/old-folder/data.bin").exists());
     // What wasn't offered is untouched.
     assert!(h.0.join("Downloads/new.zip").exists() && h.0.join("Downloads/busy-folder/today.txt").exists());
+    assert!(
+        h.0.join("Downloads/unpacked/sub/old.bin").exists() && h.0.join("Downloads/unpacked-flat/old.bin").exists()
+    );
+}
+
+#[test]
+fn ollama_tags_that_share_weights_are_one_entry() {
+    let h = TempHome::new("ollama");
+    let model = |name: &str, layers: &[(&str, u64)]| {
+        let layers: Vec<String> =
+            layers.iter().map(|(d, size)| format!(r#"{{"digest":"sha256:{d}","size":{size}}}"#)).collect();
+        let manifest = format!(r#"{{"schemaVersion":2,"layers":[{}]}}"#, layers.join(","));
+        h.file(&format!(".ollama/models/manifests/registry.ollama.ai/library/{name}"), manifest.as_bytes());
+    };
+    const GB: u64 = 1_000_000_000;
+    // An alias, and a model built FROM it with its own parameters: all three use the same weights.
+    model("llama3/latest", &[("weights-a", 4 * GB), ("licence", 10_000), ("params-a", 500)]);
+    model("llama3/8b", &[("weights-a", 4 * GB), ("licence", 10_000), ("params-a", 500)]);
+    model("mine/latest", &[("weights-a", 4 * GB), ("licence", 10_000), ("params-b", 700)]);
+    // An unrelated model that happens to carry the same licence text.
+    model("phi/latest", &[("weights-b", 2 * GB), ("licence", 10_000)]);
+    let r = scan(&h.0);
+    let models: Vec<_> = r.entries.iter().filter(|e| e.rec == "ollama").collect();
+    assert_eq!(models.len(), 2, "{models:?}");
+    let shared = models.iter().find(|e| e.label.as_deref() == Some("llama3:8b, llama3:latest, mine:latest"));
+    let shared = shared.unwrap_or_else(|| panic!("{models:?}"));
+    // Removing all three frees the weights and both sets of parameters; the licence stays for phi.
+    assert_eq!(shared.size, 4 * GB + 500 + 700);
+    assert_eq!(shared.cmd.as_deref().unwrap(), ["ollama", "rm", "llama3:8b", "llama3:latest", "mine:latest"]);
+    let phi = models.iter().find(|e| e.label.as_deref() == Some("phi:latest")).unwrap();
+    assert_eq!(phi.size, 2 * GB);
+    assert_eq!(phi.cmd.as_deref().unwrap(), ["ollama", "rm", "phi:latest"]);
 }
 
 #[test]
@@ -473,6 +514,8 @@ fn cleanup_rechecks_what_the_scan_saw() {
     h.age("Downloads/old-folder/data.bin", 200);
     h.file("Downloads/old-folder/deep/data.bin", b"x");
     h.age("Downloads/old-folder/deep/data.bin", 200);
+    h.age("Downloads/old-folder/deep", 200);
+    h.age("Downloads/old-folder", 200);
     h.file("Downloads/old.zip", &vec![1; 6_000_000]);
     h.age("Downloads/old.zip", 120);
     h.file("Developer/rs/Cargo.toml", b"[package]");
@@ -494,10 +537,13 @@ fn cleanup_rechecks_what_the_scan_saw() {
     let err = clean::clean_with(&h.0, old_file, &trash_in(&h.0)).unwrap_err();
     assert!(err.contains("written to"), "{err}");
     assert!(h.0.join("Downloads/old.zip").exists() && !h.0.join(".Trash/old.zip").exists());
-    // And for a write to a file deeper in the folder, which leaves every folder's own time alone:
-    // only looking at the files inside can tell. A new scan first, because adding and removing
-    // `fresh.txt` has already moved the folder's own time past the old one.
+    // Adding and removing `fresh.txt` moved the folder's own time, so the scan no longer calls it
+    // untouched: it isn't offered at all.
     fs::remove_file(h.0.join("Downloads/old-folder/fresh.txt")).unwrap();
+    assert!(!scan(&h.0).entries.iter().any(|e| e.path == "Downloads/old-folder"), "touched today");
+    // And for a write to a file deeper in the folder, which leaves every folder's own time alone:
+    // only looking at the files inside can tell.
+    h.age("Downloads/old-folder", 200);
     let r1 = scan(&h.0);
     let old = entry(&r1, "downloads", "Downloads/old-folder");
     std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -515,6 +561,9 @@ fn cleanup_rechecks_what_the_scan_saw() {
     h.file("Downloads/old-folder/inner/data.bin", b"x");
     h.age("Downloads/old-folder/inner/data.bin", 200);
     h.age("Downloads/old-folder/data.bin", 200);
+    for folder in ["Downloads/old-folder/inner", "Downloads/old-folder/deep", "Downloads/old-folder"] {
+        h.age(folder, 200);
+    }
     let r2 = scan(&h.0);
     let old = entry(&r2, "downloads", "Downloads/old-folder");
     fs::set_permissions(h.0.join("Downloads/old-folder/inner"), fs::Permissions::from_mode(0o000)).unwrap();
