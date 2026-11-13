@@ -172,6 +172,56 @@ fn empty_trash_keeps_the_folder() {
     assert_eq!(fs::read_dir(h.0.join(".Trash")).unwrap().count(), 0);
 }
 
+/// Without Full Disk Access macOS won't list the Trash, but lets what is in it be removed by name.
+/// A Trash that can be searched and written to but not read is the same shape: emptying it from
+/// here removes what Storage moved there, and nothing else.
+#[test]
+fn a_trash_that_cant_be_listed_loses_only_what_storage_put_there() {
+    let h = TempHome::new("hidden-trash");
+    h.file("Documents/setup.dmg", &vec![1; 21_000_000]);
+    h.big(".claude/projects/-Users-x-app/session.jsonl");
+    h.file(".claude/projects/-Users-x-app/memory/MEMORY.md", b"kept");
+    h.file(".Trash/yours.txt", b"trashed from Finder");
+    let trash = h.0.join(".Trash");
+    fs::set_permissions(&trash, fs::Permissions::from_mode(0o300)).unwrap();
+    let r = scan(&h.0);
+    assert!(!r.trash_readable);
+    assert!(!r.entries.iter().any(|e| e.rec == "trash"), "an unreadable Trash isn't offered by the scan");
+
+    // A file, and a folder that goes as a holding folder because it spares its memory.
+    let mut moved = Vec::new();
+    for (rec, path) in [("installers", "Documents/setup.dmg"), ("agentlogs", ".claude/projects/-Users-x-app")] {
+        let how = clean::clean_noting(&h.0, entry(&r, rec, path), &trash_in(&h.0), &mut moved).unwrap();
+        assert_eq!(how, clean::Method::Trash);
+    }
+    assert_eq!(moved.len(), 2, "{moved:?}");
+    assert!(moved.iter().all(|t| t.path.parent() == Some(trash.as_path())), "{moved:?}");
+
+    // The installer is put back, and something else called the same is trashed from Finder.
+    fs::rename(trash.join("setup.dmg"), h.0.join("Documents/setup.dmg")).unwrap();
+    fs::write(trash.join("setup.dmg"), b"a different file").unwrap();
+
+    let whole = storage_core::Entry {
+        key: "trash|.Trash".into(),
+        rec: "trash",
+        path: ".Trash".into(),
+        abs: trash.clone(),
+        ..Default::default()
+    };
+    assert!(clean::clean(&h.0, &whole).is_err(), "the whole Trash can't be emptied without listing it");
+    let known = storage_core::Entry { trashed: Some(moved.clone()), ..whole };
+    assert_eq!(clean::clean(&h.0, &known).unwrap(), clean::Method::Empty);
+    assert!(fs::symlink_metadata(&moved[1].path).is_err(), "the transcripts Storage moved there are gone");
+    assert!(fs::symlink_metadata(trash.join("yours.txt")).is_ok(), "what Storage didn't put there stays");
+    assert_eq!(fs::read(trash.join("setup.dmg")).unwrap(), b"a different file", "so does a newcomer with its name");
+    assert!(
+        h.0.join("Documents/setup.dmg").exists() && h.0.join(".claude/projects/-Users-x-app/memory/MEMORY.md").exists()
+    );
+    // Again, with nothing of Storage's left: nothing to do.
+    assert_eq!(clean::clean(&h.0, &known).unwrap(), clean::Method::Empty);
+    fs::set_permissions(&trash, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
 #[test]
 fn guard_refuses_unsafe_paths() {
     let h = TempHome::new("guard");

@@ -86,7 +86,9 @@ npx @tauri-apps/cli@2 build --bundles app     # or build Storage.app into target
 ```
 
 On first launch Storage explains how to grant it Full Disk Access. Without that, macOS hides the Trash and
-other apps' data, so those are reported as unreadable rather than measured.
+other apps' data, so those are reported as unreadable rather than measured. Empty Trash then deletes only
+what Storage itself moved there; empty the rest from Finder. macOS ties the permission to the app's
+signature, so a locally built, ad-hoc signed copy loses it each time it is rebuilt and has to be granted again.
 
 ### From the terminal
 

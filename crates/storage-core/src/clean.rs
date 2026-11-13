@@ -4,7 +4,8 @@
 //! - `Safe` (regenerated automatically): deleted outright.
 //! - `Review` (the user's call): moved to the Trash, so it can be put back.
 //! - Entries owned by a tool (simulators, Ollama models, Docker) run that tool's own command.
-//! - The Trash itself is emptied.
+//! - The Trash itself is emptied: all of it, or, when macOS hides it from Storage (no Full Disk
+//!   Access), what Storage moved there itself.
 //!
 //! Every path is checked against the home folder first. Only entries produced by a scan are
 //! ever acted on; callers look them up by key rather than passing paths in.
@@ -13,7 +14,7 @@ use crate::bulk::{self, Kind};
 use crate::git;
 use crate::remove;
 use crate::rules::{self, Tier};
-use crate::scan::Entry;
+use crate::scan::{Entry, Trashed};
 use crate::sys;
 use serde::Serialize;
 use std::fs;
@@ -327,7 +328,13 @@ fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
 /// one), leaving `dir` behind for the spared folder. If the Trash doesn't take it, what was
 /// gathered is put back where it was, without replacing anything written there in the meantime:
 /// an agent can start a session in that folder at any moment.
-fn trash_all_but(dir: &Path, spare: &str, move_to_trash: &dyn Fn(&Path) -> Result<(), String>) -> Result<(), String> {
+fn trash_all_but(
+    root: &Path,
+    dir: &Path,
+    spare: &str,
+    move_to_trash: &dyn Fn(&Path) -> Result<(), String>,
+    trashed: &mut Vec<Trashed>,
+) -> Result<(), String> {
     let items = bulk::list(dir, false).map_err(|e| e.to_string())?;
     let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let holding = dir.with_file_name(format!("{name} (cleared {})", sys::now()));
@@ -344,8 +351,10 @@ fn trash_all_but(dir: &Path, spare: &str, move_to_trash: &dyn Fn(&Path) -> Resul
         }
     }
     if outcome.is_ok() && !moved.is_empty() {
+        let held = remove::hold(root, &holding, None).ok().flatten();
         outcome = move_to_trash(&holding);
         if outcome.is_ok() && !holding.exists() {
+            trashed.extend(held.as_ref().and_then(located));
             return Ok(());
         }
         // "Done", and yet the folder is still here: nothing went anywhere.
@@ -381,6 +390,17 @@ pub fn clean_with(
     e: &Entry,
     move_to_trash: &dyn Fn(&Path) -> Result<(), String>,
 ) -> Result<Method, String> {
+    clean_noting(home, e, move_to_trash, &mut Vec::new())
+}
+
+/// [`clean_with`], adding to `trashed` where what it moved to the Trash ended up, so that it can be
+/// removed from there again when macOS won't let Storage list the Trash.
+pub fn clean_noting(
+    home: &Path,
+    e: &Entry,
+    move_to_trash: &dyn Fn(&Path) -> Result<(), String>,
+    trashed: &mut Vec<Trashed>,
+) -> Result<Method, String> {
     let how = method(e);
     let fail = |err: io::Error| format!("{}: {err}", shown(&e.path));
     match how {
@@ -401,7 +421,10 @@ pub fn clean_with(
             }
         }
         // Refuses a Trash that is a link to somewhere else, and never follows one inside it.
-        Method::Empty => remove::empty_under(home, Path::new(".Trash")).map_err(|err| format!("~/.Trash: {err}"))?,
+        Method::Empty => match &e.trashed {
+            None => remove::empty_under(home, Path::new(".Trash")).map_err(|err| format!("~/.Trash: {err}"))?,
+            Some(items) => empty_trashed(home, items)?,
+        },
         Method::Delete => {
             if !exists(&e.abs) {
                 return Ok(how);
@@ -437,7 +460,7 @@ pub fn clean_with(
                 lock = Some(gitdir.join("locked"));
             }
             let moved = match &e.spare {
-                Some(spare) => trash_all_but(&e.abs, spare, move_to_trash),
+                Some(spare) => trash_all_but(&root, &e.abs, spare, move_to_trash, trashed),
                 None => {
                     // The Trash takes a path, not a descriptor, so the checked object is held open
                     // across the move and asked afterwards where it went. Still where it was means
@@ -451,7 +474,10 @@ pub fn clean_with(
                                 "something else was at this path and was moved to the Trash instead; put it back from there"
                                     .into(),
                             ),
-                            _ => Ok(()),
+                            _ => {
+                                trashed.extend(held.as_ref().and_then(located));
+                                Ok(())
+                            }
                         }
                     })
                 }
@@ -480,11 +506,43 @@ pub fn clean_with(
     Ok(how)
 }
 
+/// Where a held object is now, and what it is.
+fn located(held: &remove::Held) -> Option<Trashed> {
+    Some(Trashed { path: held.path()?, ident: held.ident()? })
+}
+
+/// Empties a Trash the scan couldn't look inside by removing, by name, only what Storage moved
+/// there: without Full Disk Access macOS won't list the Trash, but still lets what is in it be
+/// removed. Anything since put back, emptied from Finder, or replaced by something else with the
+/// same name is left alone.
+fn empty_trashed(home: &Path, items: &[Trashed]) -> Result<(), String> {
+    let home = fs::canonicalize(home).map_err(|err| format!("~: {err}"))?;
+    let trash = home.join(".Trash");
+    if !fs::symlink_metadata(&trash).is_ok_and(|m| m.is_dir()) {
+        return Err("~/.Trash isn't a folder any more; left alone".into());
+    }
+    let mut first = Ok(());
+    for item in items {
+        // Only what is directly in this Trash: something from another volume went to that volume's own.
+        let Some(name) = item.path.strip_prefix(&trash).ok().filter(|rel| rel.components().count() == 1) else {
+            continue;
+        };
+        let path = trash.join(name);
+        if !fs::symlink_metadata(&path).is_ok_and(|m| (m.dev(), m.ino()) == item.ident) {
+            continue;
+        }
+        let removed = remove::remove_under(&home, &path, Some(item.ident))
+            .map_err(|err| format!("~/.Trash/{}: {err}", name.display()));
+        first = first.and(removed);
+    }
+    first
+}
+
 fn exists(p: &Path) -> bool {
     fs::symlink_metadata(p).is_ok()
 }
 
-fn move_to_trash(p: &Path) -> Result<(), String> {
+pub fn move_to_trash(p: &Path) -> Result<(), String> {
     use trash::macos::{DeleteMethod, TrashContextExtMacos};
     let mut ctx = trash::TrashContext::default();
     // NSFileManager is fast and doesn't need permission to control Finder.

@@ -145,8 +145,10 @@ async fn clean(
     let home = sys::home();
     let stop = state.stop_clean.clone();
     stop.store(false, Ordering::Release);
-    let results = tauri::async_runtime::spawn_blocking(move || {
+    let (results, moved) = tauri::async_runtime::spawn_blocking(move || {
         let mut results = Vec::new();
+        // Where what went to the Trash is now, for emptying it when the Trash can't be listed.
+        let mut moved = Vec::new();
         for e in entries {
             if stop.load(Ordering::Acquire) {
                 break;
@@ -157,15 +159,16 @@ async fn clean(
             #[cfg(debug_assertions)]
             let outcome = if std::env::var_os("STORAGE_UI_SCRIPT").is_some() {
                 let trash = home.join(".Trash");
-                clean::clean_with(&home, &e, &|p| {
+                let into_trash = |p: &std::path::Path| {
                     let name = p.file_name().ok_or("no name")?;
                     std::fs::rename(p, trash.join(name)).map_err(|e| e.to_string())
-                })
+                };
+                clean::clean_noting(&home, &e, &into_trash, &mut moved)
             } else {
-                clean::clean(&home, &e)
+                clean::clean_noting(&home, &e, &clean::move_to_trash, &mut moved)
             };
             #[cfg(not(debug_assertions))]
-            let outcome = clean::clean(&home, &e);
+            let outcome = clean::clean_noting(&home, &e, &clean::move_to_trash, &mut moved);
             log_cleanup(&e, &outcome);
             let event = match &outcome {
                 Ok(method) => CleanEvent::Done { key: e.key.clone(), method: *method },
@@ -174,7 +177,7 @@ async fn clean(
             let _ = on_progress.send(event);
             results.push((e, outcome));
         }
-        results
+        (results, moved)
     })
     .await
     .map_err(|e| format!("Cleanup stopped unexpectedly: {e}"))?;
@@ -195,11 +198,17 @@ async fn clean(
     }
     if let Some(report) = state.report.lock().unwrap().as_mut() {
         report.entries.retain(|e| !gone.contains(&e.key) && !e.parent.as_ref().is_some_and(|p| gone.contains(p)));
-        // What went to the Trash can now be emptied without a rescan.
+        // What went to the Trash can now be emptied without a rescan. If the scan couldn't look
+        // inside the Trash (no Full Disk Access), emptying it from here removes what Storage put there.
         if summary.trashed > 0 {
             let key = rules::key("trash", ".Trash");
             match report.entries.iter_mut().find(|e| e.key == key) {
-                Some(t) => t.size += summary.trashed,
+                Some(t) => {
+                    t.size += summary.trashed;
+                    if let Some(items) = &mut t.trashed {
+                        items.extend(moved);
+                    }
+                }
                 None => report.entries.push(Entry {
                     key,
                     rec: "trash",
@@ -207,6 +216,7 @@ async fn clean(
                     size: summary.trashed,
                     cat: Cat::Trash,
                     abs: sys::home().join(".Trash"),
+                    trashed: (!report.trash_readable).then_some(moved),
                     ..Default::default()
                 }),
             }

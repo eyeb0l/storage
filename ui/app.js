@@ -185,6 +185,7 @@ function heldWhy(e) {
     show that nothing changed there, so cleanup always declines it; the UI doesn't offer it. */
 const uncheckable = (e) => !!(e && e.worktree && e.worktree.partial);
 /** Whether macOS let the scan read the Trash. Without Full Disk Access it can't be emptied from here either. */
+/** macOS hid the Trash from the scan (no Full Disk Access): emptying it here removes only what Storage moved there. */
 const trashLocked = () => !!S.report && S.report.trash_readable === false;
 const usedNow = () => Math.max(0, S.usedAtScan - S.freed);
 const isBusy = () => S.phase === "scanning" || S.phase === "cleaning";
@@ -535,7 +536,7 @@ const SUGGEST = {
   agents: (b) => [`Agent logs, scratch files and old CLI versions use <b>${fmt(b)}</b>.`, "Clear agent leftovers", "agent leftovers"],
   toolchains: (b) => [`Old tool versions and device support files use <b>${fmt(b)}</b>.`, "Clear them", "old tool versions"],
   worktrees: (b, n) => [`${plural(n, "finished worktree")} with nothing uncommitted ${n === 1 ? "uses" : "use"} <b>${fmt(b)}</b>.`, "Move to Trash"],
-  trash: (b) => [`The Trash is holding <b>${fmt(b)}</b>.`, "Empty Trash"],
+  trash: (b) => [trashLocked() ? `Storage moved <b>${fmt(b)}</b> to the Trash.` : `The Trash is holding <b>${fmt(b)}</b>.`, "Empty Trash"],
 };
 
 /** Whether a safe entry is worth suggesting: not in a busy worktree, not a running app's cache, not used in the last three days. */
@@ -552,7 +553,7 @@ function suggestions() {
     if (e.rec === "worktrees") {
       if (wtRemovable(e)) add("worktrees", e);
     } else if (e.rec === "trash") {
-      if (!trashLocked()) add("trash", e);
+      add("trash", e);
     } else if (r.tier === "safe" && suggestible(e)) {
       add(r.cat, e);
     }
@@ -595,12 +596,11 @@ function resultHTML(r) {
   if (parts.length) more.push(`${fmt(S.disk.free)} available now${r.gained > 5e6 ? `, ${fmt(r.gained)} more than before` : ""}.`);
   // The system reports far less back than was deleted: usually snapshots holding on to it.
   if (r.gained != null && r.deleted > 1e9 && r.gained < r.deleted / 2) more.push("macOS hasn't released all of it yet; snapshots can hold deleted files for a while.");
-  if (r.trashed && trashLocked()) more.push("Empty the Trash from Finder to get that space back.");
   if (more.length) bits.push(`<small class="num">${esc(more.join(" "))}</small>`);
   const trash = S.entries.get("trash|.Trash");
   const buttons = [`<button type="button" class="linkbtn" data-act="log" title="A record of everything Storage has cleared">Log</button>`];
   if (n) buttons.push(`<button type="button" class="btn" data-act="issues" aria-expanded="${S.showIssues}">${S.showIssues ? "Hide details" : "Show details"}</button>`);
-  if (r.trashed && trash && !trashLocked()) buttons.push(`<button type="button" class="btn" data-act="emptytrash">Empty Trash</button>`);
+  if (r.trashed && trash) buttons.push(`<button type="button" class="btn" data-act="emptytrash">Empty Trash</button>`);
   buttons.push(`<button type="button" class="btn${n ? "" : " primary"}" data-act="dismiss">Done</button>`);
   const icon = parts.length ? `<span class="done">${CHECK}</span>` : "";
   return `${icon}<span class="text">${bits.join(" ")}</span>${buttons.join("")}`;
@@ -880,7 +880,7 @@ function renderRecs() {
       + rs.map((r) => {
         const id = "rec:" + r.rec.id;
         const open = S.open.has(id);
-        const how = r.rec.id === "trash" ? (trashLocked() ? "Storage can't read the Trash without Full Disk Access, so empty it from Finder." : "Emptying the Trash can't be undone.")
+        const how = r.rec.id === "trash" ? (trashLocked() ? "Without Full Disk Access Storage can't see inside the Trash, so emptying it here deletes only what Storage moved there. Empty the rest from Finder." : "Emptying the Trash can't be undone.")
           : r.entries.some((e) => e.cmd) ? `Runs ${esc(r.entries.find((e) => e.cmd).cmd[0])} for each item.` : "";
         const held = r.entries.filter((e) => !autoOk(e));
         const why = esc([...new Set(held.map(heldWhy))].join(", "));
@@ -891,7 +891,7 @@ function renderRecs() {
         const count = r.entries.length > 1 ? `<span class="ct num">${r.entries.length}</span>` : "";
         return `<div class="item${open ? " open" : ""}" data-open="${id}" data-cat="${r.rec.cat}">
           <div class="row">
-            <input type="checkbox" data-rec="${r.rec.id}" aria-label="Select ${esc(r.rec.title)}"${r.rec.id === "trash" && trashLocked() ? " disabled" : ""}>
+            <input type="checkbox" data-rec="${r.rec.id}" aria-label="Select ${esc(r.rec.title)}">
             ${glyph(r.rec.cat)}
             <div><div class="ti">${esc(r.rec.title)}${count}</div><div class="hi">${esc(r.rec.hint)}</div></div>
             <span></span>
@@ -930,7 +930,7 @@ function syncChecks() {
   for (const box of document.querySelectorAll("input[data-key]")) {
     const e = S.entries.get(box.dataset.key);
     box.checked = S.sel.has(box.dataset.key) || !!(e && e.parent && S.sel.has(e.parent));
-    box.disabled = !!(e && e.parent && S.sel.has(e.parent)) || (e && e.rec === "trash" && trashLocked()) || uncheckable(e);
+    box.disabled = !!(e && e.parent && S.sel.has(e.parent)) || uncheckable(e);
     if (uncheckable(e)) box.title = "Storage can't check this worktree for changes, so it won't remove it.";
   }
   const eff = effective(S.sel);
@@ -997,7 +997,9 @@ function confirmClear(keys) {
   warn(es.filter((e) => e.hold && !["app is running", "default version", "booted"].includes(e.hold)), (l) => `${names(l)}: ${l[0].hold}.`);
   warn(es.filter((e) => S.keep.has(e.key)), (l) => `You asked to keep ${names(l)}.`);
   warn(by.command, (l) => `${plural(l.length, "item")} ${is(l, "is", "are")} removed by ${is(l, "its", "their")} own tool and can't be put back (${names(l)}).`);
-  warn(by.empty, () => "Emptying the Trash can't be undone. It is emptied before anything else is moved into it.");
+  warn(by.empty, () => trashLocked()
+    ? "Deleting what Storage moved to the Trash can't be undone. Without Full Disk Access Storage can't see the rest of the Trash, which stays."
+    : "Emptying the Trash can't be undone. It is emptied before anything else is moved into it.");
 
   const row = (e) => {
     const title = entryTitle(e);
@@ -1012,7 +1014,7 @@ function confirmClear(keys) {
   $("#confirmSize").textContent = fmt(sum(es));
   $("#confirmWarn").innerHTML = warns.map((w) => `<p class="cf-warn">${esc(w)}</p>`).join("");
   $("#confirmBody").innerHTML =
-    section("Emptied", "everything in the Trash, for good", by.empty)
+    section("Emptied", trashLocked() ? "what Storage moved to the Trash, for good" : "everything in the Trash, for good", by.empty)
     + section("Removed by their own tool", "for good", by.command)
     + section("Deleted", "right away; your tools rebuild these", by.delete)
     + section("Moved to the Trash", "put back from the Trash until you empty it", by.trash);

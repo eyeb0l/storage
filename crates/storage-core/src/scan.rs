@@ -91,6 +91,18 @@ pub struct Entry {
     /// Offered only because nothing inside had changed for this long; checked again before clearing.
     #[serde(skip)]
     pub min_age: i64,
+    /// For a Trash the scan couldn't look inside (macOS hides it without Full Disk Access): what
+    /// Storage moved there itself, which is then all that emptying it removes. `None` is the whole
+    /// Trash, as scanned.
+    #[serde(skip)]
+    pub trashed: Option<Vec<Trashed>>,
+}
+
+/// Something a cleanup moved to the Trash: where it is now, and its device and inode.
+#[derive(Clone, Debug)]
+pub struct Trashed {
+    pub path: PathBuf,
+    pub ident: (u64, u64),
 }
 
 /// A folder or file in the drill-down tree. Keys are short because the tree is sent to the UI whole.
@@ -645,6 +657,7 @@ impl Scanner {
                     ident,
                     scanned: self.now,
                     min_age: h.min_age,
+                    trashed: None,
                 });
             }
         }
