@@ -38,4 +38,7 @@ jobs:
       - name: Test
         run: cargo test -p storage-core
       - name: UI syntax
-        run: node --check ui/app.js
+        run: |
+          node --check ui/app.js
+          node --check ui/docker.js
+          node --check scripts/docker-ui-test.js

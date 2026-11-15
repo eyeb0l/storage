@@ -53,9 +53,12 @@ There are three ways out, and the list is grouped by them:
 - **Removed by its own tool**: simulators and local models are removed by `simctl` and Ollama, which can't
   be undone.
 
-Docker's disk usage is reported, but cleanup is held back. The scan measures Docker Desktop's disk image,
-not the objects a global prune would remove, so even a fresh scan can't make that operation safe. Storage
-refuses Docker cleanup; review and clean up in Docker Desktop instead.
+Docker's disk usage is reported, but cleanup is held back. The Docker tab loads a separate, read-only
+inventory of Docker Desktop containers and images. Select individual objects to review their full IDs,
+references and state, then recheck them with Docker; that comparison never enables removal. Build-cache
+review remains unavailable. Object sizes include shared data and aren't added to the filesystem totals.
+Storage still refuses Docker cleanup; use Docker Desktop to remove objects. See the
+[design and validation notes](docs/docker-cleanup-design.md) for the remaining safety limits.
 
 Nothing is cleared without a confirmation that names every item and every risk.
 

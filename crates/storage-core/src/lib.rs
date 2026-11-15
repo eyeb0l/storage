@@ -3,6 +3,7 @@
 
 pub mod bulk;
 pub mod clean;
+pub mod docker;
 pub mod git;
 pub mod remove;
 pub mod rules;

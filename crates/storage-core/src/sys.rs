@@ -63,28 +63,70 @@ pub struct Output {
 /// Runs `cmd` to completion, killing it and anything it started after `timeout`. Returns `None`
 /// if it couldn't start or timed out. The limit covers reading its output too: a helper it left
 /// behind holding the pipe open can't keep the caller waiting.
-pub fn run(mut cmd: Command, timeout: Option<Duration>) -> Option<Output> {
+pub fn run(cmd: Command, timeout: Option<Duration>) -> Option<Output> {
+    run_inner(cmd, timeout, None, None)
+}
+
+/// Read-only collectors can also stop on cancellation or oversized output. Both output streams
+/// are bounded; a partial response is always failure, never a valid empty inventory.
+pub fn run_controlled(
+    cmd: Command,
+    timeout: Duration,
+    cancel: &std::sync::atomic::AtomicBool,
+    limit: usize,
+) -> Option<Output> {
+    run_inner(cmd, Some(timeout), Some(cancel), Some(limit))
+}
+
+fn run_inner(
+    mut cmd: Command,
+    timeout: Option<Duration>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    limit: Option<usize>,
+) -> Option<Output> {
     use std::os::unix::process::CommandExt;
     use std::sync::mpsc;
+    if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire)) {
+        return None;
+    }
     // Its own process group, so a timeout can take the helpers it spawned down with it.
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).env("PATH", &*PATH_ENV).process_group(0);
     let mut child = cmd.spawn().ok()?;
     let group = -(child.id() as libc::pid_t);
     let (tx, rx) = mpsc::channel();
+    let overflow = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let streams: [(bool, Box<dyn Read + Send>); 2] =
         [(true, Box::new(child.stdout.take()?)), (false, Box::new(child.stderr.take()?))];
     for (is_stdout, mut stream) in streams {
         let tx = tx.clone();
+        let overflow = overflow.clone();
         thread::spawn(move || {
             let mut buf = Vec::new();
-            let _ = stream.read_to_end(&mut buf);
+            let read = if let Some(limit) = limit {
+                stream.take(limit as u64 + 1).read_to_end(&mut buf)
+            } else {
+                stream.read_to_end(&mut buf)
+            };
+            if limit.is_some_and(|n| buf.len() > n || read.is_err()) {
+                overflow.store(true, std::sync::atomic::Ordering::Release);
+            }
             let _ = tx.send((is_stdout, buf));
         });
     }
     let deadline = timeout.map(|t| Instant::now() + t);
     // SAFETY (both uses): the child leads its own group, so this signals only it and its descendants.
     let kill_group = || unsafe { libc::kill(group, libc::SIGKILL) };
+    let stopped = || {
+        overflow.load(std::sync::atomic::Ordering::Acquire)
+            || cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire))
+    };
     let status = loop {
+        if stopped() {
+            kill_group();
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if deadline.is_some_and(|d| Instant::now() >= d) => {
@@ -103,10 +145,19 @@ pub fn run(mut cmd: Command, timeout: Option<Duration>) -> Option<Output> {
     let (mut stdout, mut stderr, mut got) = (Vec::new(), Vec::new(), 0);
     let mut killed = false;
     while got < 2 {
-        let wait = if killed { Duration::from_millis(500) } else { until.saturating_duration_since(Instant::now()) };
+        if stopped() {
+            kill_group();
+            return None;
+        }
+        let mut wait =
+            if killed { Duration::from_millis(500) } else { until.saturating_duration_since(Instant::now()) };
+        if cancel.is_some() {
+            wait = wait.min(Duration::from_millis(10));
+        }
         match rx.recv_timeout(wait) {
             Ok((true, buf)) => (stdout, got) = (buf, got + 1),
             Ok((false, buf)) => (stderr, got) = (buf, got + 1),
+            Err(mpsc::RecvTimeoutError::Timeout) if cancel.is_some() && Instant::now() < until => continue,
             Err(_) if !killed => {
                 kill_group();
                 killed = true;
@@ -115,7 +166,7 @@ pub fn run(mut cmd: Command, timeout: Option<Duration>) -> Option<Output> {
         }
     }
     // Output that never arrived is not empty output: to git's callers "" means "nothing changed".
-    if got < 2 {
+    if got < 2 || stopped() {
         return None;
     }
     Some(Output {
@@ -237,6 +288,57 @@ pub fn xcode_app() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn controlled_commands_refuse_partial_output_on_either_stream() {
+        use std::sync::atomic::AtomicBool;
+        let cancel = AtomicBool::new(false);
+        for script in ["printf '%0512d' 0", "printf '%0512d' 0 >&2"] {
+            let mut cmd = Command::new("/bin/sh");
+            cmd.args(["-c", script]);
+            assert!(run_controlled(cmd, Duration::from_secs(2), &cancel, 128).is_none());
+        }
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "printf complete"]);
+        let output = run_controlled(cmd, Duration::from_secs(2), &cancel, 128).unwrap();
+        assert!(output.ok);
+        assert_eq!(output.stdout, "complete");
+    }
+
+    #[test]
+    fn cancelled_collector_never_starts_its_command() {
+        use std::sync::atomic::AtomicBool;
+        let marker = std::env::temp_dir().join(format!("storage-cancelled-command-{}", std::process::id()));
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "printf started > \"$1\"", "test"]).arg(&marker);
+        assert!(run_controlled(cmd, Duration::from_secs(1), &AtomicBool::new(true), 128).is_none());
+        assert!(!marker.exists(), "an already cancelled operation must never spawn its command");
+    }
+
+    #[test]
+    fn controlled_command_stops_after_the_child_actually_starts() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let marker = std::env::temp_dir().join(format!("storage-active-command-{}", std::process::id()));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "printf started > \"$1\"; exec /bin/sleep 30", "test"]).arg(&marker);
+        let worker_cancel = cancel.clone();
+        let worker = thread::spawn(move || run_controlled(cmd, Duration::from_secs(5), &worker_cancel, 128));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !marker.exists() && Instant::now() < deadline {
+            thread::yield_now(); // synchronise with the actual child milestone; no settling sleep
+        }
+        let started = marker.exists();
+        let stopped_at = Instant::now();
+        cancel.store(true, Ordering::Release);
+        assert!(worker.join().unwrap().is_none());
+        assert!(started, "the child must have run before cancellation");
+        assert!(stopped_at.elapsed() < Duration::from_secs(2), "cancellation must not wait for the command timeout");
+        std::fs::remove_file(marker).unwrap();
+    }
 
     #[test]
     fn a_time_limit_covers_reading_the_output() {

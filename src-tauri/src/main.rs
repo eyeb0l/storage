@@ -11,12 +11,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use storage_core::clean::{self, Method};
+use storage_core::docker::{
+    DockerCli,
+    session::{ReviewView, Session as DockerSession, SnapshotView},
+};
 use storage_core::sys::{self, Disk};
 use storage_core::{Cat, Entry, Progress, Report, Scanner, rules};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, State};
 
 mod access;
+#[cfg(debug_assertions)]
+mod snapshot;
 
 #[derive(Default)]
 struct AppState {
@@ -26,6 +32,8 @@ struct AppState {
     scanner: Mutex<Option<Arc<Scanner>>>,
     /// Set to stop a cleanup once the item it's on is done.
     stop_clean: Arc<AtomicBool>,
+    docker: Mutex<DockerSession>,
+    stop_docker: Arc<AtomicBool>,
 }
 
 /// What `scan` fails with when it was cancelled. The UI goes back to the previous results.
@@ -59,7 +67,14 @@ struct ScanEvent {
 #[tauri::command]
 async fn scan(state: State<'_, AppState>, on_progress: Channel<ScanEvent>) -> Result<Report, String> {
     let busy = Busy::take(&state.busy)?;
+    state.docker.lock().unwrap().invalidate();
     let scanner = Arc::new(Scanner::new(sys::home()).map_err(|e| format!("Can't read your home folder: {e}"))?);
+    #[cfg(debug_assertions)]
+    let scanner = if std::env::var_os("STORAGE_UI_SCRIPT").is_some() {
+        Arc::new(Scanner::new(sys::home()).map_err(|e| e.to_string())?.home_only())
+    } else {
+        scanner
+    };
     *state.scanner.lock().unwrap() = Some(scanner.clone());
     let worker = {
         let scanner = scanner.clone();
@@ -122,6 +137,8 @@ fn cancel(state: State<'_, AppState>) {
         scanner.cancel();
     }
     state.stop_clean.store(true, Ordering::Release);
+    state.stop_docker.store(true, Ordering::Release);
+    state.docker.lock().unwrap().invalidate();
 }
 
 #[tauri::command]
@@ -131,6 +148,7 @@ async fn clean(
     on_progress: Channel<CleanEvent>,
 ) -> Result<CleanSummary, String> {
     let _busy = Busy::take(&state.busy)?;
+    state.docker.lock().unwrap().invalidate();
     let wanted: HashSet<String> = keys.into_iter().collect();
     let mut entries: Vec<Entry> = {
         let guard = state.report.lock().unwrap();
@@ -269,6 +287,88 @@ fn full_disk_access() -> bool {
     sys::full_disk_access()
 }
 
+fn docker_cli() -> Result<DockerCli, String> {
+    let executable = PathBuf::from("/Applications/Docker.app/Contents/Resources/bin/docker");
+    // The existing debug-only native UI harness must never reach the real installation.
+    #[cfg(debug_assertions)]
+    let executable = if std::env::var_os("STORAGE_UI_SCRIPT").is_some() {
+        std::env::var_os("STORAGE_DOCKER_EXECUTABLE")
+            .map(PathBuf::from)
+            .ok_or("Mock Docker executable not configured")?
+    } else {
+        executable
+    };
+    DockerCli::new(executable, sys::home())
+}
+
+#[tauri::command]
+async fn docker_inventory(state: State<'_, AppState>) -> Result<SnapshotView, String> {
+    let _busy = Busy::take(&state.busy)?;
+    state.docker.lock().unwrap().invalidate();
+    state.stop_docker.store(false, Ordering::Release);
+    let cli = docker_cli()?;
+    let stop = state.stop_docker.clone();
+    let inventory = tauri::async_runtime::spawn_blocking(move || cli.inventory_with_cancel(&stop))
+        .await
+        .map_err(|_| "Docker inventory stopped unexpectedly")??;
+    let mut session = state.docker.lock().unwrap();
+    if state.stop_docker.load(Ordering::Acquire) {
+        return Err("Docker inventory cancelled".into());
+    }
+    session.install(inventory)
+}
+
+#[tauri::command]
+fn docker_prepare_review(
+    state: State<'_, AppState>,
+    snapshot_id: String,
+    keys: Vec<String>,
+) -> Result<ReviewView, String> {
+    let _busy = Busy::take(&state.busy)?;
+    state.docker.lock().unwrap().prepare(&snapshot_id, &keys)
+}
+
+#[derive(Serialize)]
+struct DockerReviewResult {
+    cleanup_enabled: bool,
+    removed: usize,
+    message: &'static str,
+}
+
+/// A consumed token can only compare metadata. There is no Docker removal IPC or executor.
+#[tauri::command]
+async fn docker_check_review(state: State<'_, AppState>, token: String) -> Result<DockerReviewResult, String> {
+    let _busy = Busy::take(&state.busy)?;
+    let review = {
+        let mut session = state.docker.lock().unwrap();
+        let review = session.take(&token)?;
+        session.invalidate();
+        review
+    };
+    state.stop_docker.store(false, Ordering::Release);
+    let stop = state.stop_docker.clone();
+    let cli = docker_cli()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let current = cli.inventory_with_cancel(&stop)?;
+        current.compare_review(&review)
+    })
+    .await
+    .map_err(|_| "Docker review stopped unexpectedly")??;
+    if state.stop_docker.load(Ordering::Acquire) {
+        return Err("Docker review cancelled".into());
+    }
+    Ok(DockerReviewResult {
+        cleanup_enabled: false,
+        removed: 0,
+        message: "The selected objects matched at revalidation. Nothing was removed. Cleanup remains disabled because Docker can change after this check.",
+    })
+}
+
+#[tauri::command]
+fn docker_discard_review(state: State<'_, AppState>, token: String) {
+    state.docker.lock().unwrap().discard(&token);
+}
+
 /// Shows an entry in Finder.
 #[tauri::command]
 fn reveal(state: State<'_, AppState>, key: String) -> Result<(), String> {
@@ -312,6 +412,19 @@ fn dev_report(text: String) {
     drop(text);
 }
 
+#[tauri::command]
+async fn dev_snapshot(window: tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(debug_assertions)]
+    {
+        snapshot::capture(window).await
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = window;
+        Err("Native snapshot is unavailable in release builds".into())
+    }
+}
+
 fn main() {
     let builder = tauri::Builder::default();
     // Debug builds can be driven end to end: `HOME=<a throwaway home> STORAGE_UI_SCRIPT=<file.js>`
@@ -321,6 +434,17 @@ fn main() {
         if payload.event() == tauri::webview::PageLoadEvent::Finished
             && let Some(script) = std::env::var_os("STORAGE_UI_SCRIPT").and_then(|p| std::fs::read_to_string(p).ok())
         {
+            let window = webview.window();
+            // Test-only sizing and focus make native visual checks repeatable, including the
+            // minimum supported window. Release builds ignore the entire UI harness.
+            if let Some((width, height)) = std::env::var("STORAGE_UI_SIZE").ok().and_then(|size| {
+                let (w, h) = size.split_once('x')?;
+                Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))
+            }) {
+                let _ = window.set_size(tauri::LogicalSize::new(width.max(720), height.max(560)));
+            }
+            let _ = window.show();
+            let _ = window.set_focus();
             let _ = webview.eval(script);
         }
     });
@@ -337,7 +461,12 @@ fn main() {
             reveal_path,
             reveal_log,
             dev_report,
-            grant_access
+            dev_snapshot,
+            grant_access,
+            docker_inventory,
+            docker_prepare_review,
+            docker_check_review,
+            docker_discard_review
         ])
         .run(tauri::generate_context!())
         .expect("error while running Storage");

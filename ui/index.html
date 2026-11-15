@@ -28,6 +28,7 @@
   <nav class="tabs" role="tablist" aria-label="View">
     <button type="button" role="tab" data-tab="clean" aria-selected="true">Clean up</button>
     <button type="button" role="tab" data-tab="explore" aria-selected="false" tabindex="-1">Explore</button>
+    <button type="button" role="tab" data-tab="docker" aria-selected="false" tabindex="-1" aria-controls="dockerView">Docker</button>
   </nav>
 
   <div id="cleanView">
@@ -75,6 +76,21 @@
     <div class="tm-wrap"><div id="tm"></div></div>
     <p class="note"><span id="mapNote"></span> Click a folder to open it, Escape to go back, ⌥-click to show it in Finder. Tick a tile to add it to your selection.</p>
   </section>
+
+  <section class="card panel docker-panel" id="dockerView" hidden aria-labelledby="docker-h">
+    <div class="panel-head">
+      <div><h2 id="docker-h">Docker Desktop <span class="pill review">Read only</span></h2>
+        <p>Inspect individual containers and images. Cleanup is disabled; nothing here can remove Docker data.</p></div>
+      <button type="button" class="btn small" id="dockerLoad">Load inventory</button>
+      <button type="button" class="ghost" id="dockerStop" hidden>Stop</button>
+    </div>
+    <p class="docker-status" id="dockerStatus" role="status" aria-live="polite">Load an inventory from Docker Desktop to inspect its objects.</p>
+    <div id="dockerContent"></div>
+    <div class="docker-foot">
+      <span id="dockerSelection">No objects selected for review</span>
+      <button type="button" class="btn small" id="dockerReview" disabled>Review selection</button>
+    </div>
+  </section>
 </main>
 
 <div class="selbar" id="selbar" hidden>
@@ -98,8 +114,25 @@
   </form>
 </dialog>
 
+<dialog id="dockerConfirm" aria-labelledby="docker-confirm-h" aria-describedby="dockerConfirmNote">
+  <form method="dialog">
+    <header class="dlg-head">
+      <h2 id="docker-confirm-h">Review Docker objects</h2>
+      <p id="dockerConfirmNote">Recheck exactly these objects against Docker Desktop. This only compares their state; cleanup stays disabled.</p>
+      <p id="dockerReviewExpiry" role="status" aria-live="polite"></p>
+      <p id="dockerScrollHint" hidden>Scroll the object list to review every selected object.</p>
+    </header>
+    <div id="dockerConfirmBody" class="docker-confirm-body" tabindex="0" aria-label="Objects to recheck"></div>
+    <div class="dlg-foot">
+      <button type="submit" class="btn" value="cancel">Close</button>
+      <button type="button" class="btn primary" id="dockerCheck">Recheck objects</button>
+    </div>
+  </form>
+</dialog>
+
 <div id="tip" hidden></div>
 
+<script src="docker.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
