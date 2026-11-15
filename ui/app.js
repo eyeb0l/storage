@@ -1,6 +1,6 @@
 "use strict";
 
-/* Storage UI. Talks to the Rust side through three commands:
+/* Storage UI. Filesystem commands:
    scan(onProgress) → Report, clean(keys, onProgress) → summary, disk() → {total, free}.
    The UI only ever sends entry keys; the backend decides what they point at. */
 
@@ -188,7 +188,7 @@ const uncheckable = (e) => !!(e && e.worktree && e.worktree.partial);
 /** macOS hid the Trash from the scan (no Full Disk Access): emptying it here removes only what Storage moved there. */
 const trashLocked = () => !!S.report && S.report.trash_readable === false;
 const usedNow = () => Math.max(0, S.usedAtScan - S.freed);
-const isBusy = () => S.phase === "scanning" || S.phase === "cleaning";
+const isBusy = () => S.phase === "scanning" || S.phase === "cleaning" || DockerPanel.busy();
 const bytesOf = (id) => (S.cats[id] || 0) + (id === "system" ? S.system : 0);
 /** `~/path` for home-relative paths; paths outside home are absolute already. */
 const disp = (p) => (p.startsWith("/") ? p : "~/" + p);
@@ -935,7 +935,7 @@ function syncChecks() {
   }
   const eff = effective(S.sel);
   const on = eff.length > 0 && S.phase === "ready";
-  $("#selbar").hidden = !on;
+  $("#selbar").hidden = !on || S.tab === "docker";
   document.body.classList.toggle("has-sel", on);
   $("#selSize").textContent = fmt(sum(eff));
   $("#selCount").textContent = "selected · " + plural(eff.length, "item");
@@ -964,6 +964,8 @@ function renderAll() {
   renderLive();
   renderSuggest();
   renderPanels();
+  DockerPanel.render();
+  if (DockerPanel.busy()) $("#rescan").disabled = true;
 }
 
 /* ---------- confirm & clean ---------- */
@@ -1060,6 +1062,7 @@ function removeEntry(e, method) {
 }
 
 async function runClean(keys) {
+  DockerPanel.invalidate();
   Object.assign(S, { phase: "cleaning", result: null, showIssues: false, hover: null, done: 0, todo: keys.length, stopping: false });
   renderAll();
   const res = { deleted: 0, trashed: 0, docker: false, errors: [], stopped: false, gained: null };
@@ -1142,6 +1145,7 @@ function applyReport(r) {
    scan after a launch starts from the last scan's totals, so there's always something to look at. */
 async function scan() {
   if (isBusy()) return;
+  DockerPanel.invalidate();
   const had = !!S.report;
   pref(STARTED_KEY, "1");
   Object.assign(S, { phase: "scanning", intro: false, error: "", result: null, showIssues: false, hover: null, progress: 0, files: 0, scanPath: "", stopped: false });
@@ -1445,6 +1449,8 @@ function setTab(tab) {
   }
   $("#cleanView").hidden = tab !== "clean";
   $("#exploreView").hidden = tab !== "explore";
+  $("#dockerView").hidden = tab !== "docker";
+  syncChecks();
   renderExplorer();
   // The map wants the whole window: bring the tabs to the top so it fits below them.
   if (tab === "explore") $(".tabs").scrollIntoView({ block: "start", behavior: REDUCED.matches ? "auto" : "smooth" });
@@ -1456,9 +1462,11 @@ function wireExplorer() {
     if (b) setTab(b.dataset.tab);
   });
   $(".tabs").addEventListener("keydown", (ev) => {
-    if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(ev.key)) return;
     ev.preventDefault();
-    setTab(S.tab === "clean" ? "explore" : "clean");
+    const tabs = [...document.querySelectorAll(".tabs button")].map((b) => b.dataset.tab);
+    const index = tabs.indexOf(S.tab);
+    setTab(ev.key === "Home" ? tabs[0] : ev.key === "End" ? tabs[tabs.length - 1] : tabs[(index + (ev.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length]);
     $(`.tabs button[data-tab="${S.tab}"]`).focus();
   });
   $("#crumbs").addEventListener("click", (ev) => {
@@ -1683,7 +1691,7 @@ function wire() {
     const cmd = ev.metaKey || ev.ctrlKey;
     if (cmd && ev.key === "r") {
       ev.preventDefault();
-      if (!$("#confirm").open) scan();
+      if (!$("#confirm").open && !$("#dockerConfirm").open) S.tab === "docker" ? DockerPanel.load() : scan();
     } else if (cmd && ev.key === "f" && !$("#recPanel").hidden) {
       ev.preventDefault();
       if (S.tab !== "clean") setTab("clean");
@@ -1721,10 +1729,11 @@ async function start() {
   renderLegend();
   bar = new DotBar($("#hero"), $("#barSlot"), $("#fx"));
   wire();
+  DockerPanel.init();
   // Full Disk Access was just granted from the helper panel: scan again so the totals include
   // what macOS was hiding. Not in the middle of something, or with the confirm dialog open.
   TAURI.event.listen("full-disk-access", () => {
-    if (!isBusy() && !$("#confirm").open) scan();
+    if (!isBusy() && !$("#confirm").open && !$("#dockerConfirm").open) scan();
   }).catch(() => {});
   wireExplorer();
   const ask = (cmd, fallback) => invoke(cmd).catch(() => fallback);

@@ -337,6 +337,42 @@ body.has-sel #tm { height: clamp(300px, calc(100vh - 310px), 760px); }
 
 /* ---------- selection bar & dialog ---------- */
 
+.docker-panel { margin-top: 14px; }
+.docker-panel .panel-head h2 .pill { margin-left: 7px; vertical-align: middle; }
+.docker-panel .panel-head > button { flex: none; }
+.docker-status { margin: 0; padding: 4px 22px 16px; color: var(--ink-2); font-size: 13.5px; overflow-wrap: anywhere; }
+.docker-engine, .docker-note { margin: 0; padding: 10px 22px; font-size: 12.5px; color: var(--muted); }
+.docker-engine { border-top: 1px solid var(--line); line-height: 1.7; }
+.docker-group { border-top: 1px solid var(--line); }
+.docker-group > h3 { margin: 0; padding: 12px 22px 8px; font-size: 14px; }
+.docker-group > h3 > span { margin-left: 8px; }
+.docker-object { padding: 12px 22px; border-top: 1px solid var(--line-2); }
+.docker-object-head { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
+.docker-object-head label { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: 14px; cursor: pointer; }
+.docker-object-head label span { overflow-wrap: anywhere; min-width: 0; }
+.docker-object-head input { flex: none; }
+.docker-size { flex: none; color: var(--muted); font-size: 12px; }
+.docker-object-state { margin: 5px 0 8px 26px; color: var(--muted); font-size: 12px; }
+.docker-object summary { margin-left: 26px; color: var(--ink-2); font-size: 12.5px; cursor: pointer; }
+.docker-short-id { color: var(--faint); font: 11.5px var(--mono); margin-left: 6px; }
+.docker-id { font-family: var(--mono); overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; }
+.docker-details { display: grid; grid-template-columns: 105px minmax(0, 1fr); gap: 6px 12px; margin: 12px 0 3px 26px; font-size: 12px; }
+.docker-details dt { color: var(--muted); }
+.docker-details dd { margin: 0; color: var(--ink-2); overflow-wrap: anywhere; }
+.docker-foot { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 22px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); }
+.docker-confirm-body { flex: 1 1 auto; min-height: 72px; overflow: auto; padding: 0 22px 12px; outline-offset: -2px; }
+.docker-review-object { padding: 12px 0; border-top: 1px solid var(--line); }
+.docker-review-object h3 { margin: 0 0 5px; font-size: 14px; overflow-wrap: anywhere; }
+.docker-review-object p, #dockerConfirmNote, #dockerReviewExpiry, #dockerScrollHint { font-size: 13px; color: var(--muted); }
+.docker-review-object .docker-details { margin-left: 0; }
+body.busy .docker-panel { opacity: 1; }
+
+@media (max-width: 860px) {
+  .docker-object-head { flex-wrap: wrap; gap: 6px; }
+  .docker-size { margin-left: 26px; }
+  .docker-details { grid-template-columns: 82px minmax(0, 1fr); }
+}
+
 .selbar {
   position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 30;
   width: min(640px, calc(100vw - 48px)); display: flex; align-items: center; gap: 14px;
