@@ -672,9 +672,11 @@ function renderNotice() {
   el.hidden = !un.length || S.phase === "scanning" || S.hideAccess;
   if (el.hidden) return;
   const total = Math.max(un.length, S.report.unreadable_total || 0);
-  const many = total.toLocaleString();
-  el.innerHTML = `<span class="text"><b>${many} ${total === 1 ? "folder" : "folders"} couldn't be read</b>, so ${un.length === 1 ? "it counts" : "they count"} as empty and the totals are low. Give Storage Full Disk Access to count them.</span>
-    <button type="button" class="btn small" data-act="privacy">Grant Full Disk Access</button>
+  const grant = S.report.full_access === false;
+  el.innerHTML = `<details class="text"><summary><b>${plural(total, "folder")} couldn't be read.</b> Some folder sizes may be incomplete.${grant ? " Full Disk Access may help." : ""}</summary>
+    <ul>${un.map((path) => `<li>~/${esc(path)}</li>`).join("")}</ul>
+    ${total > un.length ? `<span>${plural(total - un.length, "more folder")} not shown</span>` : ""}</details>
+    ${grant ? '<button type="button" class="btn small" data-act="privacy">Grant Full Disk Access</button>' : ""}
     <button type="button" class="x" data-act="hideaccess" aria-label="Hide this note" title="Hide">×</button>`;
 }
 
